@@ -2,20 +2,25 @@ use crate::backends::DesktopUiBackend;
 use crate::custom_event::RuffleEvent;
 use crate::gui::movie::{MovieView, MovieViewRenderer};
 use crate::gui::theme::ThemeController;
-use crate::gui::{RuffleGui, MENU_HEIGHT};
+use crate::gui::{MENU_HEIGHT, RuffleGui};
 use crate::player::{LaunchOptions, PlayerController};
 use crate::preferences::GlobalPreferences;
 use anyhow::anyhow;
-use egui::{Context, ViewportId};
+use egui::{Context, FontData, FontDefinitions, ViewportId};
 use fontdb::{Database, Family, Query, Source};
 use ruffle_core::events::{ImeCursorArea, ImePurpose};
 use ruffle_core::{Player, PlayerEvent};
-use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend};
+use ruffle_frontend_utils::content::ContentDescriptor;
+use ruffle_render_wgpu::backend::{
+    WgpuRenderBackend, create_wgpu_instance, request_adapter_and_device,
+};
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
+use std::any::Any;
+use std::fs::File;
+use std::path::Path;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
-use unic_langid::LanguageIdentifier;
 use url::Url;
 use wgpu::SurfaceError;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -24,6 +29,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{ImePurpose as WinitImePurpose, Theme, Window};
 
+use super::dialogs::export_bundle_dialog::ExportBundleDialogConfiguration;
 use super::{DialogDescriptor, FilePicker};
 
 /// Integration layer connecting wgpu+winit to egui.
@@ -55,7 +61,7 @@ impl GuiController {
         initial_movie_url: Option<Url>,
         no_gui: bool,
     ) -> anyhow::Result<Self> {
-        let (instance, backend) = create_wgpu_instance(preferences.graphics_backends().into())?;
+        let (instance, backend) = select_wgpu_backend(preferences.graphics_backends().into())?;
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(window.as_ref())?)
         }?;
@@ -64,7 +70,6 @@ impl GuiController {
             &instance,
             Some(&surface),
             preferences.graphics_power_preference().into(),
-            preferences.cli.trace_path(),
         ))
         .map_err(|e| anyhow!(e.to_string()))?;
         let adapter_info = adapter.get_info();
@@ -74,12 +79,23 @@ impl GuiController {
             adapter_info.name,
             adapter_info.device_type
         );
-        let surface_format = surface
-            .get_capabilities(&adapter)
-            .formats
-            .first()
-            .cloned()
-            .expect("At least one format should be supported");
+        let preferred_formats = [
+            // by egui
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ];
+        let supported_formats = surface.get_capabilities(&adapter).formats;
+        let surface_format = preferred_formats
+            .iter()
+            .find(|format| supported_formats.contains(format))
+            .copied()
+            .unwrap_or_else(|| {
+                supported_formats
+                    .first()
+                    .copied()
+                    .expect("At least one format should be supported")
+            });
+        tracing::info!("Using surface format {:?}", surface_format);
         let size = window.inner_size();
         surface.configure(
             &device,
@@ -119,18 +135,28 @@ impl GuiController {
             size.height,
             window.scale_factor(),
         ));
-        let egui_renderer =
-            egui_wgpu::Renderer::new(&descriptors.device, surface_format, None, 1, true);
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &descriptors.device,
+            surface_format,
+            egui_wgpu::RendererOptions {
+                msaa_samples: 1,
+                depth_stencil_format: None,
+                dithering: false,
+                predictable_texture_filtering: false,
+            },
+        );
         let descriptors = Arc::new(descriptors);
         let gui = RuffleGui::new(
             Arc::downgrade(&window),
             event_loop,
-            initial_movie_url.clone(),
+            initial_movie_url.map(|url| ContentDescriptor {
+                url,
+                root_content_path: None,
+            }),
             LaunchOptions::from(&preferences),
             preferences.clone(),
         );
-        let system_fonts =
-            load_system_fonts(font_database, preferences.language().to_owned()).unwrap_or_default();
+        let system_fonts = load_system_fonts(font_database, preferences.language());
         egui_winit.egui_ctx().set_fonts(system_fonts);
 
         egui_extras::install_image_loaders(egui_winit.egui_ctx());
@@ -237,7 +263,7 @@ impl GuiController {
         &mut self,
         player: &mut PlayerController,
         opt: LaunchOptions,
-        movie_url: Url,
+        content_descriptor: ContentDescriptor,
     ) {
         self.close_movie(player);
         let movie_view = MovieView::new(
@@ -246,10 +272,10 @@ impl GuiController {
             self.size.width,
             self.size.height,
         );
-        player.create(&opt, &movie_url, movie_view);
+        player.create(&opt, &content_descriptor, movie_view);
         self.gui.on_player_created(
             opt,
-            movie_url,
+            content_descriptor,
             player
                 .get()
                 .expect("Player must exist after being created."),
@@ -329,14 +355,13 @@ impl GuiController {
             .repaint_delay;
 
         // If we're not in a UI, tell egui which cursor we prefer to use instead
-        if !self.egui_winit.egui_ctx().wants_pointer_input() {
-            if let Some(player) = player.as_deref() {
-                full_output.platform_output.cursor_icon = player
-                    .ui()
-                    .downcast_ref::<DesktopUiBackend>()
+        if !self.egui_winit.egui_ctx().wants_pointer_input()
+            && let Some(player) = player.as_deref()
+        {
+            full_output.platform_output.cursor_icon =
+                <dyn Any>::downcast_ref::<DesktopUiBackend>(player.ui())
                     .unwrap_or_else(|| panic!("UI Backend should be DesktopUiBackend"))
                     .cursor();
-            }
         }
         self.egui_winit
             .handle_platform_output(&self.window, full_output.platform_output);
@@ -377,10 +402,9 @@ impl GuiController {
         );
 
         let movie_view = if let Some(player) = player.as_deref_mut() {
-            let renderer = player
-                .renderer_mut()
-                .downcast_mut::<WgpuRenderBackend<MovieView>>()
-                .expect("Renderer must be correct type");
+            let renderer =
+                <dyn Any>::downcast_ref::<WgpuRenderBackend<MovieView>>(player.renderer_mut())
+                    .expect("Renderer must be correct type");
             Some(renderer.target())
         } else {
             None
@@ -398,6 +422,7 @@ impl GuiController {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
+                        depth_slice: None,
                     })],
                     label: Some("egui_render"),
                     ..Default::default()
@@ -463,9 +488,24 @@ impl GuiController {
             PhysicalSize::new(cursor_area.width, cursor_area.height),
         );
     }
+
+    pub fn export_bundle(&mut self) {
+        let Some(content_descriptor) = self.gui.dialogs.saved_content_descriptor() else {
+            return;
+        };
+
+        let launch_options = self.gui.dialogs.saved_launch_options();
+        let player_options = launch_options.player.clone();
+        self.gui
+            .dialogs
+            .open_dialog(DialogDescriptor::ExportBundle(Box::new(
+                ExportBundleDialogConfiguration::new(content_descriptor, player_options),
+            )));
+        self.gui.on_player_destroyed();
+    }
 }
 
-fn create_wgpu_instance(
+fn select_wgpu_backend(
     preferred_backends: wgpu::Backends,
 ) -> anyhow::Result<(wgpu::Instance, wgpu::Backends)> {
     for backend in preferred_backends.iter() {
@@ -499,11 +539,7 @@ fn create_wgpu_instance(
 }
 
 fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: backend,
-        flags: wgpu::InstanceFlags::default().with_env(),
-        ..Default::default()
-    });
+    let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
     if instance.enumerate_adapters(backend).is_empty() {
         None
     } else {
@@ -511,44 +547,150 @@ fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
     }
 }
 
-// try to load known unicode supporting fonts to draw cjk characters in egui
+// Load fallback fonts
 fn load_system_fonts(
     font_database: &Database,
-    locale: LanguageIdentifier,
-) -> anyhow::Result<egui::FontDefinitions> {
-    let mut families = Vec::new();
-    if let Some(windows_font) = match locale.language.as_str() {
-        "ja" => Some(Family::Name("MS UI Gothic")),
-        "zh" => Some(match locale.to_string().as_str() {
-            "zh-CN" => Family::Name("Microsoft YaHei"),
-            _ => Family::Name("Microsoft JhengHei"),
-        }),
-        "ko" => Some(Family::Name("Malgun Gothic")),
-        _ => None,
-    } {
-        families.push(windows_font);
-    }
-    if let Some(linux_font) = match locale.language.as_str() {
-        "ja" => Some(Family::Name("Noto Sans CJK JP")),
-        "zh" => Some(match locale.to_string().as_str() {
-            "zh-CN" => Family::Name("Noto Sans CJK SC"),
-            _ => Family::Name("Noto Sans CJK TC"),
-        }),
-        "ko" => Some(Family::Name("Noto Sans CJK KR")),
-        _ => Some(Family::Name("Noto Sans")),
-    } {
-        families.push(linux_font);
-    }
-    families.extend(
-        [
-            Family::Name("Arial Unicode MS"), // macos
-            Family::SansSerif,
-        ]
-        .iter(),
+    locale: unic_langid::LanguageIdentifier,
+) -> egui::FontDefinitions {
+    let mut fd: FontDefinitions = egui::FontDefinitions::default();
+
+    let lang = locale.language.as_str();
+    let is_ja = lang == "ja";
+    let is_ko = lang == "ko";
+    let is_zh = lang == "zh";
+    let is_sc = is_zh && locale.to_string().as_str() == "zh-CN";
+    let is_tc = is_zh && !is_sc;
+
+    let mut queries: PrioritizedQueries = Vec::new();
+
+    // The main font
+    queries.push((1, vec![Family::SansSerif]));
+
+    // Pan-CJK fonts
+    queries.push((
+        2,
+        vec![
+            Family::Name("Noto Sans CJK"),     // Open font
+            Family::Name("Source Han Sans"),   // Open font, same as Noto Sans CJK
+            Family::Name("WenQuanYi Zen Hei"), // Open font
+            Family::Name("Arial Unicode MS"),  // MacOS
+        ],
+    ));
+
+    // Korean
+    queries.push((
+        3 + if is_ko { 0 } else { 1 },
+        vec![
+            Family::Name("Noto Sans CJK KR"), // Open font
+            Family::Name("Malgun Gothic"),    // Windows
+        ],
+    ));
+
+    // Japanese
+    queries.push((
+        3 + if is_ja { 0 } else { 1 },
+        vec![
+            Family::Name("Noto Sans CJK JP"), // Open font
+            Family::Name("MS UI Gothic"),     // Windows
+        ],
+    ));
+
+    // Chinese Simplified
+    queries.push((
+        3 + if is_sc { 0 } else { 1 },
+        vec![
+            Family::Name("Noto Sans CJK SC"), // Open font
+            Family::Name("Microsoft YaHei"),  // Windows
+        ],
+    ));
+
+    // Chinese Traditional
+    queries.push((
+        3 + if is_tc { 0 } else { 1 },
+        vec![
+            Family::Name("Noto Sans CJK TC"),   // Open font
+            Family::Name("Microsoft JhengHei"), // Windows
+        ],
+    ));
+
+    // Hebrew
+    queries.push((
+        4,
+        vec![
+            Family::Name("Noto Sans Hebrew"), // Open font
+            Family::Name("Tahoma"),           // Windows
+        ],
+    ));
+
+    // Arabic
+    queries.push((
+        5,
+        vec![
+            Family::Name("Noto Sans Arabic"), // Open font
+            Family::Name("Tahoma"),           // Windows
+        ],
+    ));
+
+    // Thai
+    queries.push((
+        6,
+        vec![
+            Family::Name("Noto Sans Thai"), // Open font
+            Family::Name("Tahoma"),         // Windows
+        ],
+    ));
+
+    register_family(
+        font_database,
+        &mut fd,
+        egui::FontFamily::Proportional,
+        queries,
     );
 
+    fd
+}
+
+type FamilyQuery<'a> = Vec<Family<'a>>;
+type PrioritizedQueries<'a> = Vec<(usize, FamilyQuery<'a>)>;
+
+fn register_family(
+    font_database: &Database,
+    fd: &mut FontDefinitions,
+    family: egui::FontFamily,
+    mut queries: PrioritizedQueries<'_>,
+) {
+    queries.sort_by_key(|(priority, _)| *priority);
+    for (_, query) in queries {
+        register_family_font(font_database, fd, family.clone(), &query);
+    }
+}
+
+fn register_family_font(
+    font_database: &Database,
+    fd: &mut FontDefinitions,
+    family: egui::FontFamily,
+    query: &FamilyQuery<'_>,
+) {
+    let (name, fontdata) = match load_system_font(font_database, query) {
+        Ok((name, fontdata)) => (name, fontdata),
+        Err(e) => {
+            tracing::warn!("Failed to register {query:?} as {family}: {e}");
+            return;
+        }
+    };
+
+    tracing::info!("Registering font {name} as {family}");
+
+    fd.font_data.insert(name.clone(), fontdata.into());
+    fd.families.entry(family).or_default().push(name);
+}
+
+fn load_system_font(
+    font_database: &Database,
+    families: &Vec<Family<'_>>,
+) -> anyhow::Result<(String, FontData)> {
     let system_unicode_fonts = Query {
-        families: &families,
+        families,
         ..Query::default()
     };
 
@@ -561,24 +703,32 @@ fn load_system_fonts(
         .expect("id not found in font database");
 
     let mut fontdata = match src {
-        Source::File(path) => {
-            let data = std::fs::read(path)?;
-            egui::FontData::from_owned(data)
+        Source::File(path) | Source::SharedFile(path, _) => {
+            let data = mmap_system_font(&path)?;
+
+            // egui accepts only static data, so we have to leak mmapped fonts.
+            // This is acceptable, as we're doing it only once.
+            let data = Box::leak(Box::new(data));
+
+            egui::FontData::from_static(data)
         }
-        Source::Binary(bin) | Source::SharedFile(_, bin) => {
+        Source::Binary(bin) => {
             let data = bin.as_ref().as_ref().to_vec();
             egui::FontData::from_owned(data)
         }
     };
     fontdata.index = index;
-    tracing::info!("loaded cjk fallback font \"{}\"", name);
 
-    let mut fd = egui::FontDefinitions::default();
-    fd.font_data.insert(name.clone(), fontdata.into());
-    fd.families
-        .get_mut(&egui::FontFamily::Proportional)
-        .expect("font family not found")
-        .push(name);
+    Ok((name, fontdata))
+}
 
-    Ok(fd)
+fn mmap_system_font(path: &Path) -> anyhow::Result<memmap2::Mmap> {
+    let file = File::open(path).map_err(|e| anyhow!("Couldn't open font file at {path:?}: {e}"))?;
+
+    // SAFETY: We have to assume that the font file won't change.
+    // This assumption is realistic, as we're using system fonts only.
+    let mmap = unsafe { memmap2::Mmap::map(&file) };
+
+    let mmap = mmap.map_err(|e| anyhow!("Failed to mmap font file at {path:?}: {e}"))?;
+    Ok(mmap)
 }

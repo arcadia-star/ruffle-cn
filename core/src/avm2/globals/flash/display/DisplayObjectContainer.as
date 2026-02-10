@@ -1,4 +1,6 @@
 package flash.display {
+    import __ruffle__.stub_getter;
+
     import flash.accessibility.AccessibilityProperties;
     import flash.geom.ColorTransform;
     import flash.geom.Matrix;

@@ -1,4 +1,4 @@
-use crate::{types::point::Coordinate as PointCoordinate, Point, Twips};
+use crate::{Point, Twips, types::point::Coordinate as PointCoordinate};
 use std::fmt::{Debug, Display, Formatter};
 
 pub trait Coordinate: PointCoordinate + Ord {
@@ -161,6 +161,15 @@ impl<T: Coordinate> Rectangle<T> {
             self.x_max += amount;
             self.y_min -= amount;
             self.y_max += amount;
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn grow_x(mut self, amount: T) -> Self {
+        if self.is_valid() {
+            self.x_min -= amount;
+            self.x_max += amount;
         }
         self
     }

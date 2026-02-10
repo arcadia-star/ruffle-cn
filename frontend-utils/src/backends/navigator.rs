@@ -1,21 +1,21 @@
 mod fetch;
 
-use crate::backends::executor::{spawn_tokio, FutureSpawner};
 use crate::backends::navigator::fetch::{Response, ResponseBody};
 use crate::content::PlayingContent;
 use async_channel::{Receiver, Sender, TryRecvError};
 use async_io::Timer;
 use futures_lite::FutureExt;
-use reqwest::{cookie, header, Proxy};
+use reqwest::{Proxy, cookie, header};
 use ruffle_core::backend::navigator::{
-    async_return, create_fetch_error, get_encoding, ErrorResponse, NavigationMethod,
-    NavigatorBackend, OwnedFuture, Request, SocketMode, SuccessResponse,
+    ErrorResponse, NavigationMethod, NavigatorBackend, OwnedFuture, Request, SocketMode,
+    SuccessResponse, async_return, create_fetch_error, get_encoding,
 };
 use ruffle_core::indexmap::IndexMap;
 use ruffle_core::loader::Error;
 use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
 use std::collections::HashSet;
 use std::fs::File;
+use std::future::Future;
 use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -39,9 +39,13 @@ pub trait NavigatorInterface: Clone + Send + 'static {
     ) -> impl std::future::Future<Output = bool> + Send;
 }
 
+pub trait FutureSpawner<Err> {
+    fn spawn(&self, future: OwnedFuture<(), Err>);
+}
+
 /// Implementation of `NavigatorBackend` for non-web environments that can call
 /// out to a web browser.
-pub struct ExternalNavigatorBackend<F: FutureSpawner, I: NavigatorInterface> {
+pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterface> {
     /// Sink for tasks sent to us through `spawn_future`.
     future_spawner: F,
 
@@ -62,9 +66,9 @@ pub struct ExternalNavigatorBackend<F: FutureSpawner, I: NavigatorInterface> {
     interface: I,
 }
 
-impl<F: FutureSpawner, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
+impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
     /// Construct a navigator backend with fetch and async capability.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         mut base_url: Url,
         referer: Option<Url>,
@@ -130,7 +134,7 @@ impl<F: FutureSpawner, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
     }
 }
 
-impl<F: FutureSpawner + 'static, I: NavigatorInterface> NavigatorBackend
+impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
     for ExternalNavigatorBackend<F, I>
 {
     fn navigate_to_url(
@@ -186,7 +190,7 @@ impl<F: FutureSpawner + 'static, I: NavigatorInterface> NavigatorBackend
         let mut processed_url = match self.resolve_url(request.url()) {
             Ok(url) => url,
             Err(e) => {
-                return async_return(create_fetch_error(request.url(), e));
+                return async_return(Err(create_fetch_error(request.url(), e)));
             }
         };
 
@@ -258,7 +262,7 @@ impl<F: FutureSpawner + 'static, I: NavigatorInterface> NavigatorBackend
                 let redirected = *response.url() != processed_url;
                 if !response.status().is_success() {
                     let error = Error::HttpNotOk(
-                        format!("HTTP status is not ok, got {}", response.status()),
+                        format!("Got {}", response.status()),
                         status,
                         redirected,
                         response.content_length().unwrap_or_default(),
@@ -317,7 +321,7 @@ impl<F: FutureSpawner + 'static, I: NavigatorInterface> NavigatorBackend
                 .is_ok()
         }
 
-        let addr = format!("{}:{}", host, port);
+        let addr = format!("{host}:{port}");
         let is_allowed = self.socket_allowed.contains(&addr);
         let socket_mode = self.socket_mode;
         let interface = self.interface.clone();
@@ -467,14 +471,29 @@ impl<F: FutureSpawner + 'static, I: NavigatorInterface> NavigatorBackend
     }
 }
 
+/// Spawns a new asynchronous task in a tokio runtime, without the current executor needing to belong to tokio
+pub async fn spawn_tokio<F>(future: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move { sender.send(future.await) });
+    tokio::task::unconstrained(receiver)
+        .await
+        .expect("Oneshot should succeed")
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use ruffle_core::socket::SocketAction::{Close, Connect, Data};
     use std::net::SocketAddr;
     use std::str::FromStr;
     use tokio::net::TcpListener;
     use tokio::task;
+
+    use crate::content::ContentDescriptor;
 
     use super::*;
 
@@ -497,8 +516,8 @@ mod tests {
 
     struct TestFutureSpawner;
 
-    impl FutureSpawner for TestFutureSpawner {
-        fn spawn(&self, future: OwnedFuture<(), Error>) {
+    impl<E: 'static> FutureSpawner<E> for TestFutureSpawner {
+        fn spawn(&self, future: OwnedFuture<(), E>) {
             task::spawn_local(future);
         }
     }
@@ -554,7 +573,10 @@ mod tests {
             } else {
                 SocketMode::Deny
             },
-            Rc::new(PlayingContent::DirectFile(url)),
+            Rc::new(PlayingContent::DirectFile(ContentDescriptor {
+                url,
+                root_content_path: None,
+            })),
             (),
         )
     }
@@ -604,9 +626,7 @@ mod tests {
         let mut buffer = [0; 4096];
 
         let read = match server_socket.read(&mut buffer).await {
-            Err(e) => {
-                panic!("server read error: {}", e);
-            }
+            Err(e) => panic!("server read error: {e}"),
             Ok(read) => read,
         };
 

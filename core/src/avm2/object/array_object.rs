@@ -1,16 +1,18 @@
 //! Array-structured objects
 
+use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::string::AvmString;
+use crate::context::UpdateContext;
+use crate::string::{AvmString, WStr};
 use core::fmt;
 use gc_arena::barrier::unlock;
-use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::RefLock};
+use ruffle_common::utils::HasPrefixField;
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates array objects.
@@ -47,7 +49,7 @@ impl fmt::Debug for ArrayObject<'_> {
     }
 }
 
-#[derive(Collect, Clone)]
+#[derive(Collect, Clone, HasPrefixField)]
 #[collect(no_drop)]
 #[repr(C, align(8))]
 pub struct ArrayObjectData<'gc> {
@@ -58,28 +60,24 @@ pub struct ArrayObjectData<'gc> {
     array: RefLock<ArrayStorage<'gc>>,
 }
 
-const _: () = assert!(std::mem::offset_of!(ArrayObjectData, base) == 0);
-const _: () =
-    assert!(std::mem::align_of::<ArrayObjectData>() == std::mem::align_of::<ScriptObjectData>());
-
 impl<'gc> ArrayObject<'gc> {
     /// Construct an empty array.
-    pub fn empty(activation: &mut Activation<'_, 'gc>) -> ArrayObject<'gc> {
-        Self::from_storage(activation, ArrayStorage::new(0))
+    pub fn empty(context: &mut UpdateContext<'gc>) -> ArrayObject<'gc> {
+        Self::from_storage(context, ArrayStorage::new(0))
     }
 
     /// Build an array object from storage.
     ///
     /// This will produce an instance of the system `Array` class.
     pub fn from_storage(
-        activation: &mut Activation<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         array: ArrayStorage<'gc>,
     ) -> ArrayObject<'gc> {
-        let class = activation.avm2().classes().array;
+        let class = context.avm2.classes().array;
         let base = ScriptObjectData::new(class);
 
         ArrayObject(Gc::new(
-            activation.gc(),
+            context.gc(),
             ArrayObjectData {
                 base,
                 array: RefLock::new(array),
@@ -87,26 +85,56 @@ impl<'gc> ArrayObject<'gc> {
         ))
     }
 
-    pub fn array_storage(&self) -> Ref<ArrayStorage<'gc>> {
-        self.0.array.borrow()
+    pub fn for_prototype(
+        context: &mut UpdateContext<'gc>,
+        array_class: ClassObject<'gc>,
+    ) -> Object<'gc> {
+        let object_class = context.avm2.classes().object;
+        let base = ScriptObjectData::custom_new(
+            array_class.inner_class_definition(),
+            Some(object_class.prototype()),
+            array_class.instance_vtable(),
+        );
+
+        ArrayObject(Gc::new(
+            context.gc(),
+            ArrayObjectData {
+                base,
+                array: RefLock::new(ArrayStorage::new(0)),
+            },
+        ))
+        .into()
     }
 
-    pub fn array_storage_mut(&self, mc: &Mutation<'gc>) -> RefMut<ArrayStorage<'gc>> {
+    pub fn as_array_index(local_name: &WStr) -> Option<usize> {
+        // TODO: this should use a custom implementation instead of `parse()`,
+        // see `script_object::maybe_int_property`
+
+        local_name
+            .parse::<u32>()
+            .ok()
+            .filter(|i| *i != u32::MAX)
+            .map(|i| i as usize)
+    }
+
+    pub fn set_element(self, mc: &Mutation<'gc>, index: usize, value: Value<'gc>) {
+        unlock!(Gc::write(mc, self.0), ArrayObjectData, array)
+            .borrow_mut()
+            .set(index, value);
+    }
+
+    pub fn storage(self) -> Ref<'gc, ArrayStorage<'gc>> {
+        Gc::as_ref(self.0).array.borrow()
+    }
+
+    pub fn storage_mut(self, mc: &Mutation<'gc>) -> RefMut<'gc, ArrayStorage<'gc>> {
         unlock!(Gc::write(mc, self.0), ArrayObjectData, array).borrow_mut()
     }
 }
 
 impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
-        // SAFETY: Object data is repr(C), and a compile-time assert ensures
-        // that the ScriptObjectData stays at offset 0 of the struct- so the
-        // layouts are compatible
-
-        unsafe { Gc::cast(self.0) }
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
+        HasPrefixField::as_prefix_gc(self.0)
     }
 
     fn get_property_local(
@@ -114,9 +142,9 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if name.contains_public_namespace() {
+        if name.valid_dynamic_name() {
             if let Some(name) = name.local_name() {
-                if let Ok(index) = name.parse::<usize>() {
+                if let Some(index) = ArrayObject::as_array_index(&name) {
                     if let Some(result) = self.get_index_property(index) {
                         return Ok(result);
                     }
@@ -131,6 +159,17 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         self.0.array.borrow().get(index)
     }
 
+    fn set_index_property(
+        self,
+        activation: &mut Activation<'_, 'gc>,
+        index: usize,
+        value: Value<'gc>,
+    ) -> Option<Result<(), Error<'gc>>> {
+        self.set_element(activation.gc(), index, value);
+
+        Some(Ok(()))
+    }
+
     fn set_property_local(
         self,
         name: &Multiname<'gc>,
@@ -139,12 +178,10 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     ) -> Result<(), Error<'gc>> {
         let mc = activation.gc();
 
-        if name.contains_public_namespace() {
+        if name.valid_dynamic_name() {
             if let Some(name) = name.local_name() {
-                if let Ok(index) = name.parse::<usize>() {
-                    unlock!(Gc::write(mc, self.0), ArrayObjectData, array)
-                        .borrow_mut()
-                        .set(index, value);
+                if let Some(index) = ArrayObject::as_array_index(&name) {
+                    self.set_element(mc, index, value);
 
                     return Ok(());
                 }
@@ -162,12 +199,10 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     ) -> Result<(), Error<'gc>> {
         let mc = activation.gc();
 
-        if name.contains_public_namespace() {
+        if name.valid_dynamic_name() {
             if let Some(name) = name.local_name() {
-                if let Ok(index) = name.parse::<usize>() {
-                    unlock!(Gc::write(mc, self.0), ArrayObjectData, array)
-                        .borrow_mut()
-                        .set(index, value);
+                if let Some(index) = ArrayObject::as_array_index(&name) {
+                    self.set_element(mc, index, value);
 
                     return Ok(());
                 }
@@ -184,9 +219,9 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     ) -> Result<bool, Error<'gc>> {
         let mc = activation.gc();
 
-        if name.contains_public_namespace() {
+        if name.valid_dynamic_name() {
             if let Some(name) = name.local_name() {
-                if let Ok(index) = name.parse::<usize>() {
+                if let Some(index) = ArrayObject::as_array_index(&name) {
                     unlock!(Gc::write(mc, self.0), ArrayObjectData, array)
                         .borrow_mut()
                         .delete(index);
@@ -200,9 +235,9 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     }
 
     fn has_own_property(self, name: &Multiname<'gc>) -> bool {
-        if name.contains_public_namespace() {
+        if name.valid_dynamic_name() {
             if let Some(name) = name.local_name() {
-                if let Ok(index) = name.parse::<usize>() {
+                if let Some(index) = ArrayObject::as_array_index(&name) {
                     return self.0.array.borrow().get(index).is_some();
                 }
             }
@@ -260,21 +295,9 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     }
 
     fn property_is_enumerable(&self, name: AvmString<'gc>) -> bool {
-        name.parse::<u32>()
-            .map(|index| index < self.0.array.borrow().length() as u32)
+        ArrayObject::as_array_index(&name)
+            .map(|index| index < self.0.array.borrow().length())
             .unwrap_or(false)
             || self.base().property_is_enumerable(name)
-    }
-
-    fn as_array_object(&self) -> Option<ArrayObject<'gc>> {
-        Some(*self)
-    }
-
-    fn as_array_storage(&self) -> Option<Ref<ArrayStorage<'gc>>> {
-        Some(self.0.array.borrow())
-    }
-
-    fn as_array_storage_mut(&self, mc: &Mutation<'gc>) -> Option<RefMut<ArrayStorage<'gc>>> {
-        Some(unlock!(Gc::write(mc, self.0), ArrayObjectData, array).borrow_mut())
     }
 }

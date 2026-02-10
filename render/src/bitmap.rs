@@ -1,8 +1,9 @@
 use h263_rs_yuv::bt601::yuv420_to_rgba;
+use std::any::Any;
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use downcast_rs::{impl_downcast, Downcast};
 use swf::{Rectangle, Twips};
 
 use crate::backend::RenderBackend;
@@ -17,21 +18,20 @@ impl PartialEq for BitmapHandle {
     }
 }
 
-pub trait BitmapHandleImpl: Downcast + Debug {}
-impl_downcast!(BitmapHandleImpl);
+pub trait BitmapHandleImpl: Any + Debug {}
 
 /// Info returned by the `register_bitmap` methods.
 #[derive(Clone, Debug)]
 pub struct BitmapInfo {
     pub handle: BitmapHandle,
-    pub width: u16,
-    pub height: u16,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct BitmapSize {
-    pub width: u16,
-    pub height: u16,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// An object that returns a bitmap given an ID.
@@ -45,8 +45,7 @@ pub trait BitmapSource {
 
 pub type RgbaBufRead<'a> = Box<dyn FnOnce(&[u8], u32) + 'a>;
 
-pub trait SyncHandle: Downcast + Debug {}
-impl_downcast!(SyncHandle);
+pub trait SyncHandle: Any + Debug {}
 
 impl Clone for Box<dyn SyncHandle> {
     fn clone(&self) -> Box<dyn SyncHandle> {
@@ -93,16 +92,24 @@ impl PixelSnapping {
 
 /// Decoded bitmap data from an SWF tag.
 #[derive(Clone, Debug)]
-pub struct Bitmap {
+pub struct Bitmap<'a> {
     width: u32,
     height: u32,
     format: BitmapFormat,
-    data: Vec<u8>,
+    data: Cow<'a, [u8]>,
 }
 
-impl Bitmap {
+impl<'a> Bitmap<'a> {
     /// Ensures that `data` is the correct size for the given `width` and `height`.
-    pub fn new(width: u32, height: u32, format: BitmapFormat, mut data: Vec<u8>) -> Self {
+    #[inline]
+    pub fn new<D>(width: u32, height: u32, format: BitmapFormat, data: D) -> Self
+    where
+        D: Into<Cow<'a, [u8]>>,
+    {
+        Self::new_impl(width, height, format, data.into())
+    }
+
+    fn new_impl(width: u32, height: u32, format: BitmapFormat, mut data: Cow<'a, [u8]>) -> Self {
         // If the size is incorrect, either we screwed up or the decoder screwed up.
         let expected_len = format.length_for_size(width as usize, height as usize);
         if data.len() != expected_len {
@@ -111,9 +118,21 @@ impl Bitmap {
                 expected_len,
                 data.len(),
             );
-            // Truncate or zero pad to the expected size.
-            data.resize(expected_len, 0);
+
+            // Truncate or zero-pad to the expected size.
+            if let Cow::Borrowed(slice) = &data {
+                // Allocate the owned buffer ourselves instead of using `Cow::to_mut`, to avoid
+                // a reallocation if the buffer needs to be padded.
+                let mut vec = Vec::with_capacity(expected_len);
+                vec.extend_from_slice(&slice[..expected_len]);
+                data = Cow::Owned(vec);
+            }
+            match &mut data {
+                Cow::Owned(data) => data.resize(expected_len, 0),
+                Cow::Borrowed(_) => unreachable!(),
+            }
         }
+
         Self {
             width,
             height,
@@ -167,7 +186,7 @@ impl Bitmap {
                 let u = &self.data[luma_len..luma_len + chroma_len];
                 let v = &self.data[luma_len + chroma_len..luma_len + 2 * chroma_len];
 
-                self.data = yuv420_to_rgba(y, u, v, self.width as usize);
+                self.data = Cow::Owned(yuv420_to_rgba(y, u, v, self.width as usize));
             }
             BitmapFormat::Yuva420p => {
                 let luma_len = (self.width * self.height) as usize;
@@ -226,11 +245,6 @@ impl Bitmap {
     #[inline]
     pub fn data(&self) -> &[u8] {
         &self.data
-    }
-
-    #[inline]
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.data
     }
 
     pub fn as_colors(&self) -> impl Iterator<Item = u32> + '_ {
@@ -357,15 +371,11 @@ impl PixelRegion {
     }
 
     pub fn for_region(x: u32, y: u32, width: u32, height: u32) -> Self {
-        let a = (x, y);
-        let b = (x.saturating_add(width), y.saturating_add(height));
-        let (min, max) = ((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)));
-
         Self {
-            x_min: min.0,
-            y_min: min.1,
-            x_max: max.0,
-            y_max: max.1,
+            x_min: x,
+            y_min: y,
+            x_max: x.saturating_add(width),
+            y_max: y.saturating_add(height),
         }
     }
 
@@ -505,15 +515,15 @@ impl PixelRegion {
 
         // Mutate.
 
-        self.x_min = r1_result.0 as u32;
-        self.y_min = r1_result.1 as u32;
-        self.x_max = r1_result.2 as u32;
-        self.y_max = r1_result.3 as u32;
+        self.x_min = u32::try_from(r1_result.0).unwrap_or(0);
+        self.y_min = u32::try_from(r1_result.1).unwrap_or(0);
+        self.x_max = u32::try_from(r1_result.2).unwrap_or(0);
+        self.y_max = u32::try_from(r1_result.3).unwrap_or(0);
 
-        other.x_min = r2_result.0 as u32;
-        other.y_min = r2_result.1 as u32;
-        other.x_max = r2_result.2 as u32;
-        other.y_max = r2_result.3 as u32;
+        other.x_min = u32::try_from(r2_result.0).unwrap_or(0);
+        other.y_min = u32::try_from(r2_result.1).unwrap_or(0);
+        other.x_max = u32::try_from(r2_result.2).unwrap_or(0);
+        other.y_max = u32::try_from(r2_result.3).unwrap_or(0);
     }
 }
 

@@ -1,24 +1,60 @@
-use crate::backends::navigator::NavigatorInterface;
 use crate::bundle::Bundle;
 use std::fmt::{Debug, Formatter};
-use std::io::{ErrorKind, Read};
 use url::Url;
 
+/// Describes the content to load.
+///
+/// In case of local content, it contains not only the URL, but also the
+/// root content path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentDescriptor {
+    pub url: Url,
+
+    /// Path representing the root of the content, optional even for local
+    /// files. If not specified, Ruffle can assume the URL points to
+    /// a standalone content that does not require neighboring files.
+    #[cfg(feature = "fs")]
+    pub root_content_path: Option<std::path::PathBuf>,
+}
+
+impl ContentDescriptor {
+    pub fn new_remote(url: Url) -> Self {
+        Self {
+            url,
+            #[cfg(feature = "fs")]
+            root_content_path: None,
+        }
+    }
+
+    #[cfg(feature = "fs")]
+    pub fn new_local(
+        file: &std::path::Path,
+        root_content_path: Option<std::path::PathBuf>,
+    ) -> Option<Self> {
+        Some(Self {
+            url: Url::from_file_path(file).ok()?,
+            root_content_path,
+        })
+    }
+}
+
+/// Similar to [`ContentDescriptor`], but represents content that is already
+/// opened and playing. Contains additional metadata.
 pub enum PlayingContent {
-    DirectFile(Url),
-    Bundle(Url, Box<Bundle>),
+    DirectFile(ContentDescriptor),
+    Bundle(ContentDescriptor, Box<Bundle>),
 }
 
 impl Debug for PlayingContent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            PlayingContent::DirectFile(url) => f
+            PlayingContent::DirectFile(desc) => f
                 .debug_tuple("PlayingContent::DirectFile")
-                .field(url)
+                .field(desc)
                 .finish(),
-            PlayingContent::Bundle(url, _) => f
+            PlayingContent::Bundle(desc, _) => f
                 .debug_tuple("PlayingContent::Bundle")
-                .field(url)
+                .field(desc)
                 .field(&"_")
                 .finish(),
         }
@@ -28,23 +64,26 @@ impl Debug for PlayingContent {
 impl PlayingContent {
     pub fn initial_swf_url(&self) -> &Url {
         match self {
-            PlayingContent::DirectFile(url) => url,
+            PlayingContent::DirectFile(desc) => &desc.url,
             PlayingContent::Bundle(_, bundle) => &bundle.information().url,
         }
     }
 
     pub fn name(&self) -> String {
         match self {
-            PlayingContent::DirectFile(url) => crate::url_to_readable_name(url).to_string(),
+            PlayingContent::DirectFile(desc) => crate::url_to_readable_name(&desc.url).to_string(),
             PlayingContent::Bundle(_, bundle) => bundle.information().name.to_string(),
         }
     }
 
+    #[cfg(feature = "navigator")]
     pub async fn get_local_file(
         &self,
         url: &Url,
-        interface: impl NavigatorInterface,
+        interface: impl crate::backends::navigator::NavigatorInterface,
     ) -> Result<Vec<u8>, std::io::Error> {
+        use std::io::{ErrorKind, Read};
+
         match self {
             PlayingContent::DirectFile(_) => {
                 let path = url

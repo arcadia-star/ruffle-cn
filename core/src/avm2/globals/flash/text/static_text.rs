@@ -1,18 +1,5 @@
-use crate::avm2::error::argument_error;
-use crate::avm2::{Activation, ClassObject, Error, Object, TObject, Value};
-use crate::prelude::TDisplayObject;
+use crate::avm2::{Activation, Error, Value};
 use crate::string::AvmString;
-
-pub fn static_text_allocator<'gc>(
-    _class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Object<'gc>, Error<'gc>> {
-    return Err(Error::AvmError(argument_error(
-        activation,
-        "Error #2012: StaticText$ class cannot be instantiated.",
-        2012,
-    )?));
-}
 
 /// Implements `StaticText.text`
 pub fn get_text<'gc>(
@@ -25,8 +12,11 @@ pub fn get_text<'gc>(
         .and_then(|this| this.as_display_object())
         .and_then(|this| this.as_text())
     {
-        let text = this.text(activation.context);
-        return Ok(AvmString::new(activation.gc(), text).into());
+        return if let Some(text) = this.text(activation.context) {
+            Ok(AvmString::new(activation.gc(), text).into())
+        } else {
+            Ok(Value::Null)
+        };
     }
 
     Ok(Value::Undefined)

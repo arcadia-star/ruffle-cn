@@ -68,7 +68,7 @@ pub struct Turbulence {
     gradient: [[[f64; 2]; B_SIZE + B_SIZE + 2]; 4],
 }
 
-#[allow(clippy::many_single_char_names, clippy::needless_range_loop)] // for the sake of similarity with the original
+#[expect(clippy::many_single_char_names, clippy::needless_range_loop)] // for the sake of similarity with the original
 impl Turbulence {
     pub fn from_seed(mut seed: i64) -> Self {
         let mut s: f64;
@@ -177,7 +177,7 @@ impl Turbulence {
         lerp(sy, a, b)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn turbulence(
         &self,
         color_channel: usize,
@@ -191,7 +191,7 @@ impl Turbulence {
         octave_offsets: &[(f64, f64)],
     ) -> f64 {
         let mut stitch_info: Option<StitchInfo> = None; // Not stitching when None.
-                                                        // Adjust the base frequencies if necessary for stitching.
+        // Adjust the base frequencies if necessary for stitching.
         if do_stitching {
             // When stitching tiled turbulence, the frequencies must be adjusted
             // so that the tile borders will be continuous.

@@ -1,6 +1,6 @@
 use ruffle_core::backend::audio::{
-    swf, AudioBackend, AudioMixer, AudioMixerProxy, DecodeError, RegisterError, SoundHandle,
-    SoundInstanceHandle, SoundStreamInfo, SoundTransform,
+    AudioBackend, AudioMixer, AudioMixerProxy, DecodeError, RegisterError, SoundHandle,
+    SoundInstanceHandle, SoundStreamInfo, SoundTransform, swf,
 };
 use ruffle_core::impl_audio_mixer_backend;
 use ruffle_web_common::JsResult;
@@ -8,13 +8,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing_subscriber::layer::Layered;
 use tracing_subscriber::Registry;
+use tracing_subscriber::layer::Layered;
 use tracing_wasm::WASMLayer;
 use wasm_bindgen::prelude::*;
 use web_sys::{AudioContext, AudioScheduledSourceNode};
 
-#[allow(dead_code)]
 pub struct WebAudioBackend {
     mixer: AudioMixer,
     context: AudioContext,
@@ -258,7 +257,7 @@ impl Drop for Buffer {
 }
 
 #[wasm_bindgen(raw_module = "./ruffle-imports")]
-extern "C" {
+unsafe extern "C" {
     // Imported JS method to copy interleaved audio data into an `AudioBuffer`.
     #[wasm_bindgen(js_name = "copyToAudioBufferInterleaved")]
     fn copy_to_audio_buffer_interleaved(

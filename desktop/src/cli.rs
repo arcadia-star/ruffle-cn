@@ -1,6 +1,6 @@
-use crate::preferences::storage::StorageBackend;
 use crate::RUFFLE_VERSION;
-use anyhow::{anyhow, Error};
+use crate::preferences::storage::StorageBackend;
+use anyhow::{Error, anyhow};
 use clap::{Parser, ValueEnum};
 use ruffle_core::backend::navigator::SocketMode;
 use ruffle_core::config::Letterbox;
@@ -296,10 +296,6 @@ fn parse_gamepad_button(mapping: &str) -> Result<(GamepadButton, KeyCode), Error
 }
 
 impl Opt {
-    pub fn trace_path(&self) -> Option<&Path> {
-        None
-    }
-
     pub fn parameters(&self) -> impl '_ + Iterator<Item = (String, String)> {
         self.parameters.iter().map(|parameter| {
             let mut split = parameter.splitn(2, '=');
@@ -321,7 +317,7 @@ pub enum GameModePreference {
 }
 
 impl GameModePreference {
-    pub fn as_str(&self) -> Option<&'static str> {
+    pub fn as_str(self) -> Option<&'static str> {
         match self {
             GameModePreference::Default => None,
             GameModePreference::On => Some("on"),
@@ -351,7 +347,7 @@ pub enum OpenUrlMode {
 }
 
 impl OpenUrlMode {
-    pub fn as_str(&self) -> Option<&'static str> {
+    pub fn as_str(self) -> Option<&'static str> {
         match self {
             OpenUrlMode::Confirm => None,
             OpenUrlMode::Allow => Some("allow"),

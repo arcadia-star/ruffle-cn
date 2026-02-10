@@ -1,11 +1,11 @@
 //! DisplayObject-specific AVM1 operations.
 
+use crate::avm_warn;
+use crate::avm1::Value;
 use crate::avm1::activation::Activation;
 use crate::avm1::clamp::Clamp;
 use crate::avm1::error::Error;
 use crate::avm1::property_map::PropertyMap;
-use crate::avm1::Value;
-use crate::avm_warn;
 use crate::display_object::{
     DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
 };
@@ -20,16 +20,13 @@ pub fn get_property<'gc>(
     dobj: DisplayObject<'gc>,
     name: AvmString<'gc>,
     activation: &mut Activation<'_, 'gc>,
-    is_slash_path: bool,
 ) -> Option<Value<'gc>> {
     // Property search order for DisplayObjects:
 
     // 1) Path properties such as `_root`, `_parent`, `_levelN` (obeys case sensitivity)
     let magic_property = name.starts_with(b'_');
-    if magic_property {
-        if let Some(object) = resolve_path_property(dobj, name, activation) {
-            return Some(object);
-        }
+    if magic_property && let Some(object) = resolve_path_property(dobj, name, activation) {
+        return Some(object);
     }
 
     // 2) Child display objects with the given instance name
@@ -37,27 +34,24 @@ pub fn get_property<'gc>(
         .as_container()
         .and_then(|o| o.child_by_name(&name, activation.is_case_sensitive()))
     {
-        return if is_slash_path {
-            Some(child.object())
-        // If an object doesn't have an object representation, e.g. Graphic, then trying to access it
-        // Returns the parent instead
-        } else if let crate::display_object::DisplayObject::Graphic(_) = child {
-            child.parent().map(|p| p.object())
-        } else {
-            Some(child.object())
-        };
+        let value = child
+            .object1()
+            // If an object doesn't have an object representation, e.g. Graphic,
+            // then trying to access it returns the parent instead
+            .or_else(|| child.parent().and_then(|p| p.object1()))
+            .map_or(Value::Undefined, Value::from);
+        return Some(value);
     }
 
     // 3) Display object properties such as `_x`, `_y` (never case sensitive)
-    if magic_property {
-        if let Some(property) = activation
+    if magic_property
+        && let Some(property) = activation
             .context
             .avm1
             .display_properties()
             .get_by_name(name)
-        {
-            return Some(property.get(activation, dobj));
-        }
+    {
+        return Some(property.get(activation, dobj));
     }
 
     None
@@ -136,8 +130,10 @@ pub fn enumerate_keys<'gc>(dobj: DisplayObject<'gc>, keys: &mut Vec<AvmString<'g
     if let Some(ctr) = dobj.as_container() {
         // Button/MovieClip children are included in key list.
         for child in ctr.iter_render_list().rev() {
-            if child.as_interactive().is_some() {
-                keys.push(child.name().expect("Interactive DisplayObjects have names"));
+            // All named DOs are included in the list, even if they're not
+            // accessible by AVM1 code (e.g. `MorphShape`)
+            if let Some(name) = child.name() {
+                keys.push(name);
             }
         }
     }
@@ -150,16 +146,17 @@ fn resolve_path_property<'gc>(
 ) -> Option<Value<'gc>> {
     let case_sensitive = activation.is_case_sensitive();
     if name.eq_with_case(b"_root", case_sensitive) {
-        return Some(activation.root_object());
+        return Some(dobj.avm1_root().object1_or_undef());
     } else if name.eq_with_case(b"_parent", case_sensitive) {
         return Some(
             dobj.avm1_parent()
-                .map(|dn| dn.object().coerce_to_object(activation))
+                .map(|dn| dn.object1_or_bare(activation.gc()))
                 .map(Value::Object)
                 .unwrap_or(Value::Undefined),
         );
-    } else if name.eq_with_case(b"_global", case_sensitive) {
-        return Some(activation.context.avm1.global_object().into());
+    } else if activation.swf_version() > 5 && name.eq_with_case(b"_global", case_sensitive) {
+        // _global is available only in SWF6+
+        return Some(activation.global_object().into());
     }
 
     // Resolve level names `_levelN`.
@@ -171,7 +168,7 @@ fn resolve_path_property<'gc>(
             let level_id = parse_level_id(&name[6..]);
             let level = activation
                 .get_level(level_id)
-                .map(|o| o.object())
+                .map(|o| o.object1_or_undef())
                 .unwrap_or(Value::Undefined);
             return Some(level);
         }
@@ -325,7 +322,7 @@ fn set_x<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(x) = property_coerce_to_number(activation, val)? {
-        this.set_x(activation.gc(), Twips::from_pixels(x));
+        this.set_x(Twips::from_pixels(x));
     }
     Ok(())
 }
@@ -340,13 +337,13 @@ fn set_y<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(y) = property_coerce_to_number(activation, val)? {
-        this.set_y(activation.gc(), Twips::from_pixels(y));
+        this.set_y(Twips::from_pixels(y));
     }
     Ok(())
 }
 
-fn x_scale<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.scale_x(activation.gc()).percent().into()
+fn x_scale<'gc>(_activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
+    this.scale_x().percent().into()
 }
 
 fn set_x_scale<'gc>(
@@ -355,13 +352,13 @@ fn set_x_scale<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_scale_x(activation.gc(), Percent::from(val));
+        this.set_scale_x(Percent::from(val));
     }
     Ok(())
 }
 
-fn y_scale<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.scale_y(activation.gc()).percent().into()
+fn y_scale<'gc>(_activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
+    this.scale_y().percent().into()
 }
 
 fn set_y_scale<'gc>(
@@ -370,7 +367,7 @@ fn set_y_scale<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_scale_y(activation.gc(), Percent::from(val));
+        this.set_scale_y(Percent::from(val));
     }
     Ok(())
 }
@@ -389,7 +386,7 @@ fn total_frames<'gc>(
     this: DisplayObject<'gc>,
 ) -> Value<'gc> {
     this.as_movie_clip()
-        .map(MovieClip::total_frames)
+        .map(MovieClip::header_frames)
         .map_or(Value::Undefined, Value::from)
 }
 
@@ -403,7 +400,7 @@ fn set_alpha<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_alpha(activation.gc(), val / 100.0);
+        this.set_alpha(val / 100.0);
     }
     Ok(())
 }
@@ -455,8 +452,8 @@ fn set_height<'gc>(
     Ok(())
 }
 
-fn rotation<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    let degrees: f64 = this.rotation(activation.gc()).into();
+fn rotation<'gc>(_activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
+    let degrees: f64 = this.rotation().into();
     degrees.into()
 }
 
@@ -473,7 +470,7 @@ fn set_rotation<'gc>(
         } else if degrees > 180.0 {
             degrees -= 360.0
         }
-        this.set_rotation(activation.gc(), degrees.into());
+        this.set_rotation(degrees.into());
     }
     Ok(())
 }
@@ -486,9 +483,10 @@ fn frames_loaded<'gc>(
     _activation: &mut Activation<'_, 'gc>,
     this: DisplayObject<'gc>,
 ) -> Value<'gc> {
-    this.as_movie_clip()
-        .map(MovieClip::frames_loaded)
-        .map_or(Value::Undefined, Value::from)
+    if let Some(mc) = this.as_movie_clip() {
+        return mc.frames_loaded().min(mc.header_frames() as i32).into();
+    }
+    Value::Undefined
 }
 
 fn name<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
@@ -596,16 +594,13 @@ fn set_focus_rect<'gc>(
             Value::Object(_) => false,
             _ => val.coerce_to_f64(activation)? != 0.0,
         };
-        activation
-            .context
-            .stage
-            .set_stage_focus_rect(activation.gc(), val);
+        activation.context.stage.set_stage_focus_rect(val);
     } else if let Some(obj) = this.as_interactive() {
         let val = match val {
             Value::Undefined | Value::Null => None,
             _ => Some(val.as_bool(activation.swf_version())),
         };
-        obj.set_focus_rect(activation.gc(), val);
+        obj.set_focus_rect(val);
     }
     Ok(())
 }

@@ -1,14 +1,17 @@
 message-cant-embed =
     Ruffle no pudo ejecutar el Flash incrustado en esta página.
     Puedes intentar abrir el archivo en una pestaña aparte, para evitar este problema.
+message-restored-from-bfcache =
+    Su navegador ha recuperado este contenido Flash de una sesión anterior.
+    Para empezar de cero, refresque la página.
 panic-title = Algo salió mal :(
 more-info = Más info
 run-anyway = Ejecutar de todos modos
 continue = Continuar
-report-bug = Reportar un Error
+report-bug = Reportar un error
 update-ruffle = Actualizar Ruffle
 ruffle-demo = Demostración de web
-ruffle-desktop = Aplicación de Desktop
+ruffle-desktop = Aplicación de desktop
 ruffle-wiki = Ver la página wiki
 enable-hardware-acceleration = Al parecer, la aceleración de hardware está deshabilitada. Puede que Ruffle funcione, pero este podría funcionar muy lentamente. Puedes averiguar como habilitar aceleración de hardware presionando el enlace:
 enable-hardware-acceleration-link = Preguntas frecuentes sobre la aceleración de hardware en Chrome
@@ -78,7 +81,7 @@ error-javascript-conflict =
 error-javascript-conflict-outdated = También puedes intentar subir una versión más reciente de Ruffle que puede eludir el problema (la versión actual está desactualizada: { $buildDate }).
 error-csp-conflict =
     Ruffle encontró un problema al intentar inicializarse.
-    La Política de Seguridad de Contenido de este servidor web no permite el componente requerido ".wasm". 
+    La Política de Seguridad de Contenido de este servidor web no permite el componente requerido ".wasm".
     Si usted es el administrador del servidor, por favor consulta la wiki de Ruffle para obtener ayuda.
 error-unknown =
     Ruffle ha encontrado un problema al tratar de mostrar el contenido Flash.

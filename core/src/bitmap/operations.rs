@@ -3,12 +3,12 @@ use crate::avm2::error::make_error_2006;
 use crate::avm2::vector::VectorStorage;
 use crate::avm2::{Activation, Error, Value as Avm2Value};
 use crate::bitmap::bitmap_data::{
-    BitmapData, BitmapDataDrawError, BitmapDataWrapper, ChannelOptions, Color, IBitmapDrawable,
+    BitmapData, BitmapDataDrawError, BitmapRawData, ChannelOptions, Color, IBitmapDrawable,
     LehmerRng, ThresholdOperation,
 };
 use crate::bitmap::turbulence::Turbulence;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::TDisplayObject;
+use crate::display_object::{RenderOptions, TDisplayObject};
 use gc_arena::Mutation;
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::bitmap::{PixelRegion, PixelSnapping};
@@ -26,11 +26,11 @@ use swf::{BlendMode, ColorTransform, Fixed8, Rectangle, Twips};
 ///
 /// This will allow us to be able to optimise the implementations and share the
 /// same code between VMs.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn fill_rect<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x: i32,
     y: i32,
     width: i32,
@@ -53,7 +53,7 @@ pub fn fill_rect<'gc>(
         // If we're filling a partial region, finish any gpu->cpu sync
         target.sync(renderer)
     };
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
     let color = Color::from(color).to_premultiplied_alpha(write.transparency());
 
     if is_full {
@@ -69,7 +69,7 @@ pub fn fill_rect<'gc>(
 pub fn set_pixel32<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x: u32,
     y: u32,
     color: u32,
@@ -78,7 +78,7 @@ pub fn set_pixel32<'gc>(
         return;
     }
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
     let transparency = write.transparency();
     write.set_pixel32_raw(
         x,
@@ -88,23 +88,22 @@ pub fn set_pixel32<'gc>(
     write.set_cpu_dirty(mc, PixelRegion::for_pixel(x, y));
 }
 
-pub fn get_pixel32(
-    target: BitmapDataWrapper,
-    renderer: &mut dyn RenderBackend,
-    x: u32,
-    y: u32,
-) -> u32 {
+pub fn get_pixel32(target: BitmapData, renderer: &mut dyn RenderBackend, x: u32, y: u32) -> u32 {
     if x >= target.width() || y >= target.height() {
         return 0;
     }
     let read = target.read_area(PixelRegion::for_pixel(x, y), renderer);
-    read.get_pixel32_raw(x, y).to_un_multiplied_alpha().into()
+    if read.transparency() {
+        read.get_pixel32_raw(x, y).to_un_multiplied_alpha().into()
+    } else {
+        read.get_pixel32_raw(x, y).into()
+    }
 }
 
 pub fn set_pixel<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x: u32,
     y: u32,
     color: Color,
@@ -113,7 +112,7 @@ pub fn set_pixel<'gc>(
         return;
     }
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     if write.transparency() {
         let current_alpha = write.get_pixel32_raw(x, y).alpha();
@@ -125,12 +124,7 @@ pub fn set_pixel<'gc>(
     write.set_cpu_dirty(mc, PixelRegion::for_pixel(x, y));
 }
 
-pub fn get_pixel(
-    target: BitmapDataWrapper,
-    renderer: &mut dyn RenderBackend,
-    x: u32,
-    y: u32,
-) -> u32 {
+pub fn get_pixel(target: BitmapData, renderer: &mut dyn RenderBackend, x: u32, y: u32) -> u32 {
     if x >= target.width() || y >= target.height() {
         return 0;
     }
@@ -143,22 +137,22 @@ pub fn get_pixel(
 pub fn flood_fill<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x: u32,
     y: u32,
     color: u32,
-) {
+) -> bool {
     if x >= target.width() || y >= target.height() {
-        return;
+        return false;
     }
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
     let expected_color = write.get_pixel32_raw(x, y);
     let replace_color = Color::from(color).to_premultiplied_alpha(write.transparency());
 
     if expected_color == replace_color {
         // If we try to replace X with X, we'll infinite loop
-        return;
+        return false;
     }
 
     let mut pending = vec![(x, y)];
@@ -186,11 +180,12 @@ pub fn flood_fill<'gc>(
         }
     }
     write.set_cpu_dirty(mc, dirty_region);
+    true
 }
 
 pub fn noise<'gc>(
     mc: &Mutation<'gc>,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     seed: i32,
     low: u8,
     high: u8,
@@ -198,7 +193,8 @@ pub fn noise<'gc>(
     gray_scale: bool,
 ) {
     let (target, _) = target.overwrite_cpu_pixels_from_gpu(mc);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
+    let transparency = write.transparency();
 
     let true_seed = if seed <= 0 {
         (-seed + 1) as u32
@@ -211,53 +207,53 @@ pub fn noise<'gc>(
     for y in 0..write.height() {
         for x in 0..write.width() {
             let pixel_color = if gray_scale {
-                let gray = rng.gen_range(low..high);
-                let alpha = if channel_options.contains(ChannelOptions::ALPHA) {
-                    rng.gen_range(low..high)
+                let gray = rng.random_range(low..high);
+                let alpha = if transparency && channel_options.contains(ChannelOptions::ALPHA) {
+                    rng.random_range(low..high)
                 } else {
                     255
                 };
 
-                Color::argb(alpha, gray, gray, gray)
+                Color::rgba(gray, gray, gray, alpha)
             } else {
                 let r = if channel_options.contains(ChannelOptions::RED) {
-                    rng.gen_range(low..high)
+                    rng.random_range(low..high)
                 } else {
                     0
                 };
 
                 let g = if channel_options.contains(ChannelOptions::GREEN) {
-                    rng.gen_range(low..high)
+                    rng.random_range(low..high)
                 } else {
                     0
                 };
 
                 let b = if channel_options.contains(ChannelOptions::BLUE) {
-                    rng.gen_range(low..high)
+                    rng.random_range(low..high)
                 } else {
                     0
                 };
 
-                let a = if channel_options.contains(ChannelOptions::ALPHA) {
-                    rng.gen_range(low..high)
+                let a = if transparency && channel_options.contains(ChannelOptions::ALPHA) {
+                    rng.random_range(low..high)
                 } else {
                     255
                 };
 
-                Color::argb(a, r, g, b)
+                Color::rgba(r, g, b, a)
             };
 
-            write.set_pixel32_raw(x, y, pixel_color);
+            write.set_pixel32_raw(x, y, pixel_color.to_premultiplied_alpha(transparency));
         }
     }
     let region = PixelRegion::for_whole_size(write.width(), write.height());
     write.set_cpu_dirty(mc, region)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn perlin_noise<'gc>(
     mc: &Mutation<'gc>,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     base: (f64, f64),
     num_octaves: usize,
     random_seed: i64,
@@ -268,7 +264,7 @@ pub fn perlin_noise<'gc>(
     offsets: Vec<(f64, f64)>, // must contain `num_octaves` values
 ) {
     let (target, _) = target.overwrite_cpu_pixels_from_gpu(mc);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     let turb = Turbulence::from_seed(random_seed);
 
@@ -364,37 +360,37 @@ pub fn perlin_noise<'gc>(
                 color[3] = 255;
             }
 
-            write.set_pixel32_raw(x, y, Color::argb(color[3], color[0], color[1], color[2]));
+            write.set_pixel32_raw(x, y, Color::rgba(color[0], color[1], color[2], color[3]));
         }
     }
     let region = PixelRegion::for_whole_size(write.width(), write.height());
     write.set_cpu_dirty(mc, region)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn copy_channel<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     dest_point: (i32, i32),
     src_rect: (i32, i32, i32, i32),
-    source_bitmap: BitmapDataWrapper<'gc>,
+    source_bitmap: BitmapData<'gc>,
     source_channel: i32,
     dest_channel: i32,
 ) {
     let (min_x, min_y) = dest_point;
     let (src_min_x, src_min_y, src_width, src_height) = src_rect;
 
-    let channel_shift: u32 = match source_channel {
+    let channel_shift: Option<u32> = match source_channel {
         // red
-        1 => 16,
+        1 => Some(16),
         // green
-        2 => 8,
+        2 => Some(8),
         // blue
-        4 => 0,
+        4 => Some(0),
         // alpha
-        8 => 24,
-        _ => 0,
+        8 => Some(24),
+        _ => None,
     };
     let transparency = target.transparency();
 
@@ -419,7 +415,7 @@ pub fn copy_channel<'gc>(
     };
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     for y in 0..dest_region.height().min(source_region.height()) {
         for x in 0..dest_region.width().min(source_region.width()) {
@@ -445,7 +441,11 @@ pub fn copy_channel<'gc>(
                     .into()
             };
 
-            let source_part = (source_color >> channel_shift) & 0xFF;
+            let source_part = if let Some(shift) = channel_shift {
+                (source_color >> shift) & 0xFF
+            } else {
+                0
+            };
 
             let result_color: u32 = match dest_channel {
                 // red
@@ -470,11 +470,11 @@ pub fn copy_channel<'gc>(
     write.set_cpu_dirty(mc, dest_region);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn color_transform<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x_min: u32,
     y_min: u32,
     x_max: u32,
@@ -494,6 +494,9 @@ pub fn color_transform<'gc>(
         return;
     }
 
+    // Clamp both min and max coordinates to target size to enforce invariants
+    let x_min = x_min.min(target.width());
+    let y_min = y_min.min(target.height());
     let x_max = x_max.min(target.width());
     let y_max = y_max.min(target.height());
 
@@ -502,7 +505,7 @@ pub fn color_transform<'gc>(
     }
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
     let transparency = write.transparency();
 
     for y in y_min..y_max {
@@ -524,12 +527,12 @@ pub fn color_transform<'gc>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn threshold<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
-    source_bitmap: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source_bitmap: BitmapData<'gc>,
     src_rect: (i32, i32, i32, i32),
     dest_point: (i32, i32),
     operation: ThresholdOperation,
@@ -571,7 +574,7 @@ pub fn threshold<'gc>(
     };
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     // Check each pixel
     for y in 0..dest_region.height() {
@@ -583,31 +586,25 @@ pub fn threshold<'gc>(
 
             // Extract source colour
             let source_color = if let Some(source) = &source {
-                source
-                    .get_pixel32_raw(src_x, src_y)
-                    .to_un_multiplied_alpha()
+                source.get_pixel32_raw(src_x, src_y)
             } else {
-                write.get_pixel32_raw(src_x, src_y).to_un_multiplied_alpha()
+                write.get_pixel32_raw(src_x, src_y)
             };
 
             // If the test, as defined by the operation pass then set to input colour
             if operation.matches(u32::from(source_color) & mask, masked_threshold) {
                 modified_count += 1;
-                write.set_pixel32_raw(dest_x, dest_y, Color::from(colour));
+                // [NA] Spot the bug? We don't set the alpha to 0xFF for opaque BMDs. Yay flash.
+                write.set_pixel32_raw(
+                    dest_x,
+                    dest_y,
+                    Color::from(colour).to_premultiplied_alpha(true),
+                );
             } else {
                 // If the test fails, but copy_source is true then take the colour from the source
                 if copy_source {
-                    let new_color = if let Some(source) = &source {
-                        source
-                            .get_pixel32_raw(dest_x, dest_y)
-                            .to_un_multiplied_alpha()
-                    } else {
-                        write
-                            .get_pixel32_raw(dest_x, dest_y)
-                            .to_un_multiplied_alpha()
-                    };
-
-                    write.set_pixel32_raw(dest_x, dest_y, new_color);
+                    // [NA] Spot the bug? We don't set the alpha to 0xFF for opaque BMDs. Yay flash.
+                    write.set_pixel32_raw(dest_x, dest_y, source_color);
                 }
             }
             if let Some(dirty_area) = &mut dirty_area {
@@ -628,7 +625,7 @@ pub fn threshold<'gc>(
 pub fn scroll<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x: i32,
     y: i32,
 ) {
@@ -662,7 +659,7 @@ pub fn scroll<'gc>(
     let dx = if reverse_x { -1 } else { 1 };
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     let mut src_y = y_from;
     while src_y != y_to {
@@ -682,8 +679,8 @@ pub fn scroll<'gc>(
 pub fn palette_map<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
-    source_bitmap: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source_bitmap: BitmapData<'gc>,
     src_rect: (i32, i32, i32, i32),
     dest_point: (i32, i32),
     channel_arrays: ([u32; 256], [u32; 256], [u32; 256], [u32; 256]),
@@ -712,7 +709,7 @@ pub fn palette_map<'gc>(
     };
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     for y in 0..dest_region.height() {
         for x in 0..dest_region.width() {
@@ -747,19 +744,18 @@ pub fn palette_map<'gc>(
 /// Compare two BitmapData objects.
 /// Returns `None` if the bitmaps are equivalent.
 pub fn compare<'gc>(
+    mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    left: BitmapDataWrapper<'gc>,
-    right: BitmapDataWrapper<'gc>,
+    left: BitmapData<'gc>,
+    right: BitmapData<'gc>,
 ) -> Option<BitmapData<'gc>> {
     // This function expects that the two bitmaps have the same dimensions.
     // TODO: Relax this assumption and return a special value instead?
     debug_assert_eq!(left.width(), right.width());
     debug_assert_eq!(left.height(), right.height());
 
-    let left = left.sync(renderer);
-    let left = left.read();
-    let right = right.sync(renderer);
-    let right = right.read();
+    let left = left.sync(renderer).borrow();
+    let right = right.sync(renderer).borrow();
 
     let mut different = false;
     let pixels = left
@@ -770,25 +766,26 @@ pub fn compare<'gc>(
             let bitmap_pixel = bitmap_pixel.to_un_multiplied_alpha();
             let other_pixel = other_pixel.to_un_multiplied_alpha();
             if bitmap_pixel == other_pixel {
-                Color::argb(0, 0, 0, 0)
+                Color::rgba(0, 0, 0, 0)
             } else if bitmap_pixel.with_alpha(0) != other_pixel.with_alpha(0) {
                 different = true;
-                Color::argb(
-                    0xff,
+                Color::rgba(
                     bitmap_pixel.red().wrapping_sub(other_pixel.red()),
                     bitmap_pixel.green().wrapping_sub(other_pixel.green()),
                     bitmap_pixel.blue().wrapping_sub(other_pixel.blue()),
+                    0xff,
                 )
             } else {
                 different = true;
                 let alpha = bitmap_pixel.alpha().wrapping_sub(other_pixel.alpha());
-                Color::argb(alpha, alpha, alpha, alpha)
+                Color::rgba(alpha, alpha, alpha, alpha)
             }
         })
         .collect();
 
     if different {
         Some(BitmapData::new_with_pixels(
+            mc,
             left.width(),
             left.height(),
             true,
@@ -801,7 +798,7 @@ pub fn compare<'gc>(
 
 pub fn hit_test_point(
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper,
+    target: BitmapData,
     alpha_threshold: u8,
     test_point: (i32, i32),
 ) -> bool {
@@ -820,7 +817,7 @@ pub fn hit_test_point(
 
 pub fn hit_test_rectangle(
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper,
+    target: BitmapData,
     alpha_threshold: u8,
     top_left: (i32, i32),
     size: (i32, i32),
@@ -841,10 +838,10 @@ pub fn hit_test_rectangle(
 
 pub fn hit_test_bitmapdata<'gc>(
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     self_point: (i32, i32),
     self_threshold: u8,
-    test: BitmapDataWrapper<'gc>,
+    test: BitmapData<'gc>,
     test_point: (i32, i32),
     test_threshold: u8,
 ) -> bool {
@@ -902,22 +899,32 @@ pub fn hit_test_bitmapdata<'gc>(
 
 pub fn color_bounds_rect(
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper,
+    target: BitmapData,
     find_color: bool,
-    mask: u32,
-    color: u32,
+    mut mask: u32,
+    mut color: u32,
 ) -> (u32, u32, u32, u32) {
     let mut min_x = target.width();
     let mut max_x = 0;
     let mut min_y = target.height();
     let mut max_y = 0;
 
-    let target = target.sync(renderer);
-    let read = target.read();
+    let target = target.sync(renderer).borrow();
 
-    for x in 0..read.width() {
-        for y in 0..read.height() {
-            let pixel_raw: u32 = read.get_pixel32_raw(x, y).into();
+    // We need to work in the same colorspace (premult) - but that means the color won't always match for opaque BMD
+    // Let's just cheat it by pretending the alpha is part of the mask, that way it'll essentially ignore it (as it's always 0xFF)
+    // For transparent ones, we kinda get this for free. If they specified alpha, they need to add alpha to the mask.
+    // If they didn't specify alpha, it'll premult down to 0, and match everything (in FP too)
+    if !target.transparency() {
+        mask |= 0xFF000000;
+    }
+    color = Color::bgra_u32(color)
+        .to_premultiplied_alpha(target.transparency())
+        .to_bgra_u32();
+
+    for x in 0..target.width() {
+        for y in 0..target.height() {
+            let pixel_raw: u32 = target.get_pixel32_raw(x, y).into();
             let color_matches = if find_color {
                 (pixel_raw & mask) == color
             } else {
@@ -948,8 +955,8 @@ pub fn color_bounds_rect(
 pub fn merge<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
-    source_bitmap: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source_bitmap: BitmapData<'gc>,
     src_rect: (i32, i32, i32, i32),
     dest_point: (i32, i32),
     rgba_mult: (i32, i32, i32, i32),
@@ -979,7 +986,7 @@ pub fn merge<'gc>(
     };
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     for y in 0..dest_region.height() {
         for x in 0..dest_region.width() {
@@ -1018,7 +1025,7 @@ pub fn merge<'gc>(
                 + dest_color.alpha() as u16 * (256 - alpha_mult))
                 / 256;
 
-            let mix_color = Color::argb(alpha as u8, red as u8, green as u8, blue as u8);
+            let mix_color = Color::rgba(red as u8, green as u8, blue as u8, alpha as u8);
 
             write.set_pixel32_raw(
                 dest_x,
@@ -1033,8 +1040,8 @@ pub fn merge<'gc>(
 
 pub fn copy_pixels<'gc>(
     context: &mut UpdateContext<'gc>,
-    target: BitmapDataWrapper<'gc>,
-    source_bitmap: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source_bitmap: BitmapData<'gc>,
     src_rect: (i32, i32, i32, i32),
     dest_point: (i32, i32),
     merge_alpha: bool,
@@ -1069,14 +1076,14 @@ pub fn copy_pixels<'gc>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn copy_pixels_with_alpha_source<'gc>(
     context: &mut UpdateContext<'gc>,
-    target: BitmapDataWrapper<'gc>,
-    source_bitmap: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source_bitmap: BitmapData<'gc>,
     src_rect: (i32, i32, i32, i32),
     dest_point: (i32, i32),
-    alpha_bitmap: BitmapDataWrapper<'gc>,
+    alpha_bitmap: BitmapData<'gc>,
     alpha_point: (i32, i32),
     merge_alpha: bool,
 ) {
@@ -1120,7 +1127,7 @@ pub fn copy_pixels_with_alpha_source<'gc>(
     };
 
     let target = target.sync(context.renderer);
-    let mut write = target.write(context.gc());
+    let mut write = target.borrow_mut(context.gc());
 
     for src_y in src_min_y..(src_min_y + src_height) {
         for src_x in src_min_x..(src_min_x + src_width) {
@@ -1183,7 +1190,7 @@ pub fn copy_pixels_with_alpha_source<'gc>(
             let r = (source_color.red() as f64 / a).round() as u8;
             let g = (source_color.green() as f64 / a).round() as u8;
             let b = (source_color.blue() as f64 / a).round() as u8;
-            let intermediate_color = Color::argb(source_color.alpha(), r, g, b)
+            let intermediate_color = Color::rgba(r, g, b, source_color.alpha())
                 .with_alpha(final_alpha)
                 .to_premultiplied_alpha(true);
 
@@ -1210,11 +1217,11 @@ pub fn copy_pixels_with_alpha_source<'gc>(
 
 pub fn apply_filter<'gc>(
     context: &mut UpdateContext<'gc>,
-    target: BitmapDataWrapper<'gc>,
-    source: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source: BitmapData<'gc>,
     source_point: (u32, u32),
     source_size: (u32, u32),
-    dest_point: (u32, u32),
+    dest_point: (i32, i32),
     filter: Filter,
 ) {
     // Prevent creating 0x0 textures.
@@ -1232,7 +1239,7 @@ pub fn apply_filter<'gc>(
         let mut source_region = PixelRegion::for_whole_size(source.width(), source.height());
         let mut dest_region = PixelRegion::for_whole_size(target.width(), target.height());
         dest_region.clamp_with_intersection(
-            (dest_point.0 as i32, dest_point.1 as i32),
+            dest_point,
             (source_point.0 as i32, source_point.1 as i32),
             (source_size.0 as i32, source_size.1 as i32),
             &mut source_region,
@@ -1257,8 +1264,8 @@ pub fn apply_filter<'gc>(
 
     let source_handle = source.bitmap_handle(context.gc(), context.renderer);
     let (target, _) = target.overwrite_cpu_pixels_from_gpu(context.gc());
-    let mut write = target.write(context.gc());
-    let dest = write.bitmap_handle(context.renderer).unwrap();
+    let mut write = target.borrow_mut(context.gc());
+    let dest = write.bitmap_handle(context.renderer);
 
     let sync_handle = context.renderer.apply_filter(
         source_handle,
@@ -1277,12 +1284,11 @@ pub fn apply_filter<'gc>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn copy_on_cpu<'gc>(
     context: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    source: BitmapDataWrapper<'gc>,
-    dest: BitmapDataWrapper<'gc>,
+    source: BitmapData<'gc>,
+    dest: BitmapData<'gc>,
     source_region: PixelRegion,
     dest_region: PixelRegion,
     mut blend: bool,
@@ -1298,7 +1304,7 @@ fn copy_on_cpu<'gc>(
 
     if source.ptr_eq(dest) {
         let dest = dest.sync(renderer);
-        let mut write = dest.write(context);
+        let mut write = dest.borrow_mut(context);
 
         for y in 0..dest_region.height() {
             for x in 0..dest_region.width() {
@@ -1316,7 +1322,7 @@ fn copy_on_cpu<'gc>(
         write.set_cpu_dirty(context, dest_region);
     } else {
         let dest = dest.sync(renderer);
-        let mut dest_write = dest.write(context);
+        let mut dest_write = dest.borrow_mut(context);
         let source_read = source.read_area(source_region, renderer);
 
         if !blend && (dest_write.transparency() || !source_read.transparency()) {
@@ -1374,18 +1380,17 @@ fn copy_on_cpu<'gc>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn blend_and_transform<'gc>(
     context: &mut UpdateContext<'gc>,
-    source: BitmapDataWrapper<'gc>,
-    dest: BitmapDataWrapper<'gc>,
+    source: BitmapData<'gc>,
+    dest: BitmapData<'gc>,
     source_region: PixelRegion,
     dest_region: PixelRegion,
     transform: &ColorTransform,
 ) {
     if source.ptr_eq(dest) {
         let dest = dest.sync(context.renderer);
-        let mut write = dest.write(context.gc());
+        let mut write = dest.borrow_mut(context.gc());
 
         for y in 0..dest_region.height() {
             for x in 0..dest_region.width() {
@@ -1406,7 +1411,7 @@ fn blend_and_transform<'gc>(
         write.set_cpu_dirty(context.gc(), dest_region);
     } else {
         let dest = dest.sync(context.renderer);
-        let mut dest_write = dest.write(context.gc());
+        let mut dest_write = dest.borrow_mut(context.gc());
         let source_read = source.read_area(source_region, context.renderer);
         let opaque = !dest_write.transparency();
 
@@ -1430,10 +1435,10 @@ fn blend_and_transform<'gc>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn draw<'gc>(
     context: &mut UpdateContext<'gc>,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     mut source: IBitmapDrawable<'gc>,
     transform: Transform,
     smoothing: bool,
@@ -1569,9 +1574,11 @@ pub fn draw<'gc>(
             data.render(smoothing, &mut render_context, PixelSnapping::Never);
         }
         IBitmapDrawable::DisplayObject(object) => {
-            // Note that we do *not* use `render_base`,
-            // as we want to ignore the object's mask and normal transform
-            object.render_self(&mut render_context);
+            let options = RenderOptions {
+                apply_transform: false,
+                ..Default::default()
+            };
+            object.render_with_options(&mut render_context, options);
         }
     }
 
@@ -1599,7 +1606,7 @@ pub fn draw<'gc>(
     };
 
     let (target, include_dirty_area) = target.overwrite_cpu_pixels_from_gpu(context.gc());
-    let mut write = target.write(context.gc());
+    let mut write = target.borrow_mut(context.gc());
     // If we have another dirty area to preserve, expand this to include it
     if let Some(old) = include_dirty_area {
         dirty_region.union(old);
@@ -1623,7 +1630,7 @@ pub fn draw<'gc>(
 }
 
 pub fn get_vector<'gc>(
-    target: BitmapDataWrapper,
+    target: BitmapData,
     renderer: &mut dyn RenderBackend,
     x: i32,
     y: i32,
@@ -1650,7 +1657,7 @@ pub fn get_vector<'gc>(
 
 pub fn set_vector<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x_min: u32,
     y_min: u32,
     x_max: u32,
@@ -1667,7 +1674,7 @@ pub fn set_vector<'gc>(
     let region = PixelRegion::for_region(x_min, y_min, width as u32, height as u32);
 
     let bitmap_data = target.sync(activation.context.renderer);
-    let mut bitmap_data = bitmap_data.write(activation.gc());
+    let mut bitmap_data = bitmap_data.borrow_mut(activation.gc());
     let transparency = bitmap_data.transparency();
     let mut iter = vector.iter();
     bitmap_data.set_cpu_dirty(activation.gc(), region);
@@ -1690,7 +1697,7 @@ pub fn set_vector<'gc>(
 
 pub fn get_pixels_as_byte_array<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    target: BitmapDataWrapper,
+    target: BitmapData,
     x: i32,
     y: i32,
     width: i32,
@@ -1713,11 +1720,11 @@ pub fn get_pixels_as_byte_array<'gc>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn set_pixels_from_byte_array<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
     x: i32,
     y: i32,
     width: i32,
@@ -1735,7 +1742,7 @@ pub fn set_pixels_from_byte_array<'gc>(
         // If we're filling a partial region, finish any gpu->cpu sync
         target.sync(renderer)
     };
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     if region.width() > 0 && region.height() > 0 {
         for y in region.y_min..region.y_max {
@@ -1756,12 +1763,12 @@ pub fn set_pixels_from_byte_array<'gc>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn pixel_dissolve<'gc>(
     mc: &Mutation<'gc>,
     renderer: &mut dyn RenderBackend,
-    target: BitmapDataWrapper<'gc>,
-    source_bitmap: BitmapDataWrapper<'gc>,
+    target: BitmapData<'gc>,
+    source_bitmap: BitmapData<'gc>,
     src_rect: (i32, i32, i32, i32),
     dest_point: (i32, i32),
     random_seed: i32,
@@ -1834,8 +1841,8 @@ pub fn pixel_dissolve<'gc>(
     }
 
     fn write_pixel(
-        write: &mut RefMut<BitmapData>,
-        different_source_than_target: &Option<Ref<BitmapData>>,
+        write: &mut RefMut<'_, BitmapRawData>,
+        different_source_than_target: &Option<Ref<'_, BitmapRawData>>,
         fill_color: u32,
         transparency: bool,
         base_point: (u32, u32),
@@ -1910,7 +1917,7 @@ pub fn pixel_dissolve<'gc>(
     let num_pixels = num_pixels.min(final_pixel_sequence_length as i32);
 
     let target = target.sync(renderer);
-    let mut write = target.write(mc);
+    let mut write = target.borrow_mut(mc);
 
     // For compliance with the official Flash Player, we always write the pixel at (0, 0).
     write_pixel(

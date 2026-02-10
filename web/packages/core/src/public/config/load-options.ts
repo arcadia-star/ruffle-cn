@@ -264,6 +264,50 @@ export enum NetworkingAccessMode {
 }
 
 /**
+ * The behavior of scrolling the web page.
+ */
+export enum ScrollingBehavior {
+    /**
+     * Always scroll the page.
+     */
+    Always = "always",
+
+    /**
+     * Never scroll the page.
+     */
+    Never = "never",
+
+    /**
+     * Scroll the page only when the Flash content hasn't handled the scroll.
+     */
+    Smart = "smart",
+}
+
+/**
+ * Specifies how device fonts should be rendered.
+ */
+export enum DeviceFontRenderer {
+    /**
+     * Use Ruffle's embedded text rendering engine.
+     *
+     * It cannot access device fonts and uses fonts provided in the
+     * configuration and the default Noto Sans font as a fallback.
+     *
+     * This is the default method.
+     */
+    Embedded = "embedded",
+
+    /**
+     * Use an offscreen canvas for text rendering.
+     *
+     * It can access and render device fonts, glyphs are rendered as bitmaps.
+     *
+     * This is an experimental method and some features might not work properly.
+     */
+    Canvas = "canvas",
+}
+
+/**
  * Represents a host, port and proxyUrl. Used when a SWF file tries to use a Socket.
  */
 export interface SocketProxy {
@@ -513,6 +557,15 @@ export interface BaseLoadOptions {
     salign?: string;
 
     /**
+     * Controls orientation on mobile in fullscreen mode.
+     *
+     * This is equivalent to the AIR-only method Stage.setAspectRatio.
+     *
+     * @default ""
+     */
+    fullScreenAspectRatio?: string;
+
+    /**
      * If set to true, movies are prevented from changing the stage alignment.
      *
      * @default false
@@ -522,9 +575,9 @@ export interface BaseLoadOptions {
     /**
      * This is equivalent to Stage.quality.
      *
-     * @default "high"
+     * @default null
      */
-    quality?: string;
+    quality?: string | null;
 
     /**
      * This is equivalent to Stage.scaleMode.
@@ -720,6 +773,22 @@ export interface BaseLoadOptions {
      * you can rewrite it to something else that works.
      */
     urlRewriteRules?: Array<[RegExp | string, string]>;
+
+    /**
+     * Set the scrolling behavior, i.e. how scrolling Flash content affects the web page.
+     *
+     * The original behavior in Flash Player differed across versions, browsers, and wmode settings.
+     *
+     * @default ScrollingBehavior.Smart
+     */
+    scrollingBehavior?: ScrollingBehavior;
+
+    /**
+     * Specify how device fonts should be rendered.
+     *
+     * @default DeviceFontRenderer.Embedded
+     */
+    deviceFontRenderer?: DeviceFontRenderer;
 }
 
 /**
@@ -742,7 +811,7 @@ export interface DataLoadOptions extends BaseLoadOptions {
     /**
      * The data to load a movie from.
      */
-    data: ArrayLike<number> | ArrayBufferLike;
+    data: ArrayLike<number> | ArrayBuffer;
 
     /**
      * The filename of the SWF movie to provide to ActionScript.

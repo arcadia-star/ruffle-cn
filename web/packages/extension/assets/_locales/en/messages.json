@@ -26,6 +26,12 @@
     "settings_log_level_info": {
         "message": "Info"
     },
+    "settings_log_level_debug": {
+        "message": "Debug"
+    },
+    "settings_log_level_trace": {
+        "message": "Trace"
+    },
     "settings_max_execution_duration": {
         "message": "Maximum allowed ActionScript execution duration (in seconds)"
     },
@@ -37,6 +43,12 @@
     },
     "settings_preferred_renderer_auto": {
         "message": "Automatic"
+    },
+    "settings_device_font_renderer": {
+        "message": "Device font renderer"
+    },
+    "device_font_renderer_embedded": {
+        "message": "Embedded"
     },
     "settings_advanced_options": {
         "message": "Advanced Options"

@@ -2,24 +2,14 @@
 
 use ruffle_macros::istr;
 
-use crate::avm2::e4x::{name_to_multiname, E4XNamespace, E4XNode, E4XNodeKind};
-use crate::avm2::error::{make_error_1117, type_error};
+use crate::avm2::e4x::{E4XNamespace, E4XNode, E4XNodeKind, name_to_multiname};
+use crate::avm2::error::{make_error_1088, make_error_1117};
 pub use crate::avm2::object::xml_allocator;
 use crate::avm2::object::{E4XOrXml, QNameObject, TObject, XmlListObject, XmlObject};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::string::AvmString;
 use crate::avm2::{Activation, ArrayObject, ArrayStorage, Error, Multiname, Object, Value};
 use crate::avm2_stub_method;
-
-fn ill_formed_markup_err<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-) -> Result<Value<'gc>, Error<'gc>> {
-    type_error(
-        activation,
-        "Error #1088: The markup in the document following the root element must be well-formed.",
-        1088,
-    )
-}
 
 pub fn init<'gc>(
     activation: &mut Activation<'_, 'gc>,
@@ -29,7 +19,7 @@ pub fn init<'gc>(
     let this = this.as_object().unwrap();
 
     let this = this.as_xml_object().unwrap();
-    let value = args[0];
+    let value = args.get_value(0);
     let ignore_comments = args.get_bool(1);
     let ignore_processing_instructions = args.get_bool(2);
     let ignore_whitespace = args.get_bool(3);
@@ -41,7 +31,7 @@ pub fn init<'gc>(
             // an error, since E4XNode::parse would otherwise return an empty array
             // (which would be accepted)
             if xml_list.length() != 1 {
-                return Err(Error::AvmError(ill_formed_markup_err(activation)?));
+                return Err(make_error_1088(activation));
             }
         }
     }
@@ -95,7 +85,7 @@ pub fn init<'gc>(
             if let Some(element) = single_element_node {
                 *element
             } else {
-                return Err(Error::AvmError(ill_formed_markup_err(activation)?));
+                return Err(make_error_1088(activation));
             }
         }
     };
@@ -199,7 +189,7 @@ pub fn set_pretty_indent<'gc>(
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    activation.avm2().xml_settings.pretty_indent = args.get_i32(activation, 0)?;
+    activation.avm2().xml_settings.pretty_indent = args.get_i32(0);
 
     Ok(Value::Undefined)
 }
@@ -334,7 +324,8 @@ pub fn namespace_internal_impl<'gc>(
     let in_scope_ns = node.in_scope_namespaces();
 
     // 4. If prefix was not specified
-    if args[0] == Value::Bool(false) {
+    let has_prefix = args.get_bool(0);
+    if !has_prefix {
         // a. If x.[[Class]] ∈ {"text", "comment", "processing-instruction"}, return null
         if matches!(
             &*node.kind(),
@@ -350,7 +341,7 @@ pub fn namespace_internal_impl<'gc>(
         Ok(xml.namespace_object(activation, &in_scope_ns)?.into())
     } else {
         // a. Let prefix = ToString(prefix)
-        let prefix = args.get_string(activation, 1)?;
+        let prefix = args.get_string(activation, 1);
 
         // b. Find a Namespace ns ∈ inScopeNS, such that ns.prefix = prefix. If no such ns exists, let ns = undefined.
         // c. Return ns
@@ -519,10 +510,7 @@ pub fn remove_namespace<'gc>(
 
     // 6. If ns.prefix == undefined
     if ns.prefix.is_none() {
-        let E4XNodeKind::Element {
-            ref mut namespaces, ..
-        } = &mut *node.kind_mut(activation.gc())
-        else {
+        let E4XNodeKind::Element { namespaces, .. } = &mut *node.kind_mut(activation.gc()) else {
             unreachable!()
         };
         // 6.a. If there exists a namespace n ∈ x.[[InScopeNamespaces]],
@@ -530,10 +518,7 @@ pub fn remove_namespace<'gc>(
         namespaces.retain(|namespace| namespace.uri != ns.uri);
     } else {
         // 7. Else
-        let E4XNodeKind::Element {
-            ref mut namespaces, ..
-        } = &mut *node.kind_mut(activation.gc())
-        else {
+        let E4XNodeKind::Element { namespaces, .. } = &mut *node.kind_mut(activation.gc()) else {
             unreachable!()
         };
         // 7.a. If there exists a namespace n ∈ x.[[InScopeNamespaces]],
@@ -589,7 +574,7 @@ pub fn in_scope_namespaces<'gc>(
     // 4. Let a be a new Array created as if by calling the constructor, new Array()
     // ...
     // 7. Return a
-    Ok(ArrayObject::from_storage(activation, ArrayStorage::from_iter(in_scope_ns)).into())
+    Ok(ArrayObject::from_storage(activation.context, ArrayStorage::from_iter(in_scope_ns)).into())
 }
 
 pub fn namespace_declarations<'gc>(
@@ -605,7 +590,7 @@ pub fn namespace_declarations<'gc>(
     // 1. Let a be a new Array created as if by calling the constructor, new Array()
     // 2. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return a
     if !node.is_element() {
-        return Ok(ArrayObject::empty(activation).into());
+        return Ok(ArrayObject::empty(activation.context).into());
     }
 
     // 3. Let y = x.[[Parent]]
@@ -635,7 +620,11 @@ pub fn namespace_declarations<'gc>(
     // 9.a. Call the [[Put]] method of a with arguments ToString(i) and ns
     // 9.b. Let i = i + 1
     // 10. Return a
-    Ok(ArrayObject::from_storage(activation, ArrayStorage::from_iter(declared_namespaces)).into())
+    Ok(ArrayObject::from_storage(
+        activation.context,
+        ArrayStorage::from_iter(declared_namespaces),
+    )
+    .into())
 }
 
 pub fn local_name<'gc>(
@@ -680,7 +669,7 @@ pub fn child<'gc>(
     let this = this.as_object().unwrap();
 
     let xml = this.as_xml_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
 
     let list = xml.child(&multiname, activation);
     Ok(list.into())
@@ -737,7 +726,7 @@ pub fn contains<'gc>(
     let value = args.get_value(0);
 
     if let Some(other) = value.as_object().and_then(|obj| obj.as_xml_object()) {
-        let result = xml.node().equals(&other.node());
+        let result = xml.node().equals(other.node());
         return Ok(result.into());
     }
     Ok(false.into())
@@ -776,7 +765,7 @@ pub fn elements<'gc>(
     let this = this.as_object().unwrap();
 
     let xml = this.as_xml_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
 
     let list = xml.elements(&multiname, activation);
     Ok(list.into())
@@ -814,7 +803,7 @@ pub fn attribute<'gc>(
     let this = this.as_object().unwrap();
 
     let xml = this.as_xml_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], true)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), true)?;
     let attributes = if let E4XNodeKind::Element { attributes, .. } = &*xml.node().kind() {
         attributes
             .iter()
@@ -850,7 +839,7 @@ pub fn call_handler<'gc>(
                         .get_or_create_xml(activation)
                         .into());
                 }
-                return Err(Error::AvmError(ill_formed_markup_err(activation)?));
+                return Err(make_error_1088(activation));
             }
         }
     }
@@ -939,7 +928,7 @@ pub fn descendants<'gc>(
     let this = this.as_object().unwrap();
 
     let xml = this.as_xml_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
 
     // 2. Return the result of calling the [[Descendants]] method of x with argument name
     Ok(xml
@@ -1051,7 +1040,7 @@ pub fn processing_instructions<'gc>(
     let this = this.as_object().unwrap();
 
     let xml = this.as_xml_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
     let nodes = if let E4XNodeKind::Element { children, .. } = &*xml.node().kind() {
         children
             .iter()
@@ -1209,7 +1198,7 @@ pub fn replace<'gc>(
 
     let xml = this.as_xml_object().unwrap();
     let self_node = xml.node();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
     let value = args.get_value(1);
 
     // 1. If x.[[Class]] ∈ {"text", "comment", "processing-instruction", "attribute"}, return x
@@ -1226,7 +1215,7 @@ pub fn replace<'gc>(
     } else {
         // NOTE: Depends on root swf version.
         // See https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/XMLObject.cpp#L1540
-        if activation.context.swf.version() <= 9 {
+        if activation.context.root_swf.version() <= 9 {
             // SWF version 9 edge case, call XML constructor.
             // https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/XMLObject.cpp#L2241-L2242
             activation
@@ -1337,8 +1326,8 @@ pub fn set_notification<'gc>(
     avm2_stub_method!(activation, "XML", "setNotification");
     let xml = this.as_xml_object().unwrap();
     let node = xml.node();
-    let fun = args.try_get_object(activation, 0);
-    node.set_notification(fun.and_then(|f| f.as_function_object()), activation.gc());
+    let func = args.try_get_function(0);
+    node.set_notification(func, activation.gc());
     Ok(Value::Undefined)
 }
 

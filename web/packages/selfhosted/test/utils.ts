@@ -9,7 +9,7 @@ declare global {
 
 declare module "ruffle-core/dist/public/player" {
     interface PlayerElement {
-        __ruffle_log__: string;
+        __ruffle_log__: string[];
     }
 }
 
@@ -29,9 +29,8 @@ export async function isRufflePlayerLoaded(
     return (
         (await browser.execute(
             (player) =>
-                // https://github.com/webdriverio/webdriverio/issues/6486
                 // TODO: How can we import ReadyState enum?
-                (player as unknown as Player.PlayerElement).ruffle().readyState,
+                (player as Player.PlayerElement).ruffle().readyState,
             await player,
         )) === 2
     );
@@ -87,14 +86,13 @@ export async function injectRuffle(browser: WebdriverIO.Browser) {
 export async function playAndMonitor(
     browser: WebdriverIO.Browser,
     player: ChainablePromiseElement,
-    expectedOutput: string = "Hello from Flash!\n",
+    expectedOutput: string[] = ["Hello from Flash!"],
 ) {
     await throwIfError(browser);
     await waitForPlayerToLoad(browser, await player);
     await setupAndPlay(browser, await player);
 
-    const actualOutput = await getTraceOutput(browser, player);
-    expect(actualOutput).to.eql(expectedOutput);
+    await expectTraceOutput(browser, player, expectedOutput);
 }
 
 export async function setupAndPlay(
@@ -103,11 +101,11 @@ export async function setupAndPlay(
 ) {
     await browser.execute(
         (playerElement) => {
-            // https://github.com/webdriverio/webdriverio/issues/6486
-            const player = playerElement as unknown as Player.PlayerElement;
-            player.__ruffle_log__ = "";
+            const player = playerElement as Player.PlayerElement;
+            player.__ruffle_log__ = [];
             player.ruffle().traceObserver = (msg) => {
-                player.__ruffle_log__ += msg + "\n";
+                player.__ruffle_log__.push(msg);
+                console.log(`[trace] ${msg}`);
             };
             player.ruffle().resume();
         },
@@ -118,33 +116,66 @@ export async function setupAndPlay(
 export async function getTraceOutput(
     browser: WebdriverIO.Browser,
     player: ChainablePromiseElement,
-) {
-    // Await any trace output
+    messageCount: number = 1,
+): Promise<string[]> {
+    // Await trace output
     await browser.waitUntil(
         async () => {
-            return (
-                (await browser.execute(
-                    (player) => {
-                        // https://github.com/webdriverio/webdriverio/issues/6486
-                        return (player as unknown as Player.PlayerElement)
-                            .__ruffle_log__;
-                    },
-                    await player,
-                )) !== ""
+            const log = await browser.execute(
+                (player) => {
+                    return (player as Player.PlayerElement).__ruffle_log__;
+                },
+                await player,
             );
+            return log.length >= messageCount;
         },
         {
-            timeoutMsg: "Expected Ruffle to trace a message",
+            timeoutMsg: `Expected Ruffle to trace ${messageCount} messages`,
         },
     );
 
-    // Get the output, and replace it with an empty string for any future test
-    return await browser.execute((playerElement) => {
-        // https://github.com/webdriverio/webdriverio/issues/6486
-        const player = playerElement as unknown as Player.PlayerElement;
-        const log = player.__ruffle_log__;
-        player.__ruffle_log__ = "";
-        return log;
+    // Get the output
+    return await browser.execute(
+        (playerElement, messageCount) => {
+            const player = playerElement as Player.PlayerElement;
+            const m = messageCount as unknown as number;
+            return player.__ruffle_log__.splice(0, m);
+        },
+        player,
+        messageCount,
+    );
+}
+
+export async function expectTraceOutput(
+    browser: WebdriverIO.Browser,
+    player: ChainablePromiseElement,
+    messages: string[],
+) {
+    expect(
+        await getTraceOutput(browser, player, messages.length),
+    ).to.deep.equal(messages);
+}
+
+export async function clearTraceOutput(
+    browser: WebdriverIO.Browser,
+    player: ChainablePromiseElement,
+) {
+    await browser.execute((playerElement) => {
+        const player = playerElement as Player.PlayerElement;
+        player.__ruffle_log__ = [];
+    }, player);
+}
+
+export async function assertNoMoreTraceOutput(
+    browser: WebdriverIO.Browser,
+    player: ChainablePromiseElement,
+) {
+    await browser.execute((playerElement) => {
+        const player = playerElement as Player.PlayerElement;
+        if (player.__ruffle_log__.length > 0) {
+            const log = player.__ruffle_log__.join("\n");
+            throw new Error(`Unexpected trace:\n${log}`);
+        }
     }, player);
 }
 
@@ -184,22 +215,18 @@ export function loadJsAPI(swf?: string) {
 
         await injectRuffleAndWait(browser);
 
-        player = (await browser.execute(() => {
+        player = await browser.execute(() => {
             const ruffle = (window.RufflePlayer as Setup.PublicAPI).newest();
             const player = ruffle!.createPlayer();
             const container = document.getElementById("test-container");
             container!.appendChild(player);
             return player;
-            // https://github.com/webdriverio/webdriverio/issues/6486
-        })) as unknown as WebdriverIO.Element;
+        });
 
         if (swf) {
             await browser.execute(
                 async (player, swf) => {
-                    // https://github.com/webdriverio/webdriverio/issues/6486
-                    await (player as unknown as Player.PlayerElement)
-                        .ruffle()
-                        .load(swf);
+                    await (player as Player.PlayerElement).ruffle().load(swf);
                 },
                 player,
                 swf,
@@ -213,15 +240,15 @@ export async function closeAllModals(
     browser: WebdriverIO.Browser,
     player: ChainablePromiseElement,
 ) {
+    const modals = await player.$$(".modal:not(.hidden)");
     await browser.execute(
-        (modals) => {
-            for (const modal of modals) {
-                const m = modal as unknown as HTMLElement;
+        ({ modals }) => {
+            for (const m of modals) {
                 const cl = m.querySelector(".close-modal")! as HTMLElement;
                 cl.click();
             }
         },
-        await player.$$(".modal:not(.hidden)"),
+        { modals },
     );
 }
 

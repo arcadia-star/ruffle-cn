@@ -1,10 +1,10 @@
+use crate::Transforms;
 use crate::backend::RenderTargetMode;
 use crate::buffer_pool::{AlwaysCompatible, PoolEntry, TexturePool};
 use crate::descriptors::Descriptors;
 use crate::globals::Globals;
 use crate::utils::create_buffer_with_data;
 use crate::utils::run_copy_pipeline;
-use crate::Transforms;
 use std::cell::OnceCell;
 use std::sync::Arc;
 
@@ -27,7 +27,6 @@ impl ResolveBuffer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn new_manual(texture: wgpu::Texture) -> Self {
         Self {
             texture: PoolOrArcTexture::Manual((
@@ -75,14 +74,14 @@ pub enum PoolOrArcTexture {
 impl PoolOrArcTexture {
     pub fn texture(&self) -> &wgpu::Texture {
         match self {
-            PoolOrArcTexture::Pool(ref texture) => &texture.0,
-            PoolOrArcTexture::Manual(ref texture) => &texture.0,
+            PoolOrArcTexture::Pool(texture) => &texture.0,
+            PoolOrArcTexture::Manual(texture) => &texture.0,
         }
     }
     pub fn view(&self) -> &wgpu::TextureView {
         match self {
-            PoolOrArcTexture::Pool(ref texture) => &texture.1,
-            PoolOrArcTexture::Manual(ref texture) => &texture.1,
+            PoolOrArcTexture::Pool(texture) => &texture.1,
+            PoolOrArcTexture::Manual(texture) => &texture.1,
         }
     }
 }
@@ -104,7 +103,6 @@ impl FrameBuffer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn new_manual(texture: wgpu::Texture, size: wgpu::Extent3d) -> Self {
         Self {
             texture: PoolOrArcTexture::Manual((
@@ -356,12 +354,12 @@ impl CommandTarget {
         get_whole_frame_bind_group(&self.whole_frame_bind_group, descriptors, self.size)
     }
 
-    pub fn color_attachments(&self) -> Option<wgpu::RenderPassColorAttachment> {
+    pub fn color_attachments(&self) -> Option<wgpu::RenderPassColorAttachment<'_>> {
         let mut load = wgpu::LoadOp::Load;
-        if self.color_needs_clear.set(false).is_ok() {
-            if let Some(clear_color) = self.render_target_mode.color() {
-                load = wgpu::LoadOp::Clear(clear_color);
-            }
+        if self.color_needs_clear.set(false).is_ok()
+            && let Some(clear_color) = self.render_target_mode.color()
+        {
+            load = wgpu::LoadOp::Clear(clear_color);
         }
         Some(wgpu::RenderPassColorAttachment {
             view: self.frame_buffer.view(),
@@ -370,6 +368,7 @@ impl CommandTarget {
                 load,
                 store: wgpu::StoreOp::Store,
             },
+            depth_slice: None,
         })
     }
 
@@ -381,7 +380,7 @@ impl CommandTarget {
         &self,
         descriptors: &Descriptors,
         pool: &mut TexturePool,
-    ) -> Option<wgpu::RenderPassDepthStencilAttachment> {
+    ) -> Option<wgpu::RenderPassDepthStencilAttachment<'_>> {
         let new_buffer = self.depth.get().is_none();
         let stencil = self
             .depth

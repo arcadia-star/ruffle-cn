@@ -1,20 +1,23 @@
+use crate::avm1::Object as Avm1Object;
 use crate::avm2::Activation;
-use crate::avm2::Object as Avm2Object;
+use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::RenderContext;
 use crate::context::UpdateContext;
 use crate::display_object::InteractiveObject;
 use crate::display_object::TInteractiveObject;
-use crate::display_object::{DisplayObjectBase, DisplayObjectPtr};
+use crate::display_object::{BoundsMode, DisplayObjectBase, DisplayObjectPtr};
 use crate::events::{ClipEvent, ClipEventResult};
 use crate::prelude::*;
 
 use crate::display_object::container::ChildContainer;
 use crate::display_object::interactive::InteractiveObjectBase;
 use crate::tag_utils::SwfMovie;
+use crate::vminterface::Instantiator;
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::lock::{Lock, RefLock};
 use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use ruffle_common::utils::HasPrefixField;
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
 
@@ -32,12 +35,13 @@ impl fmt::Debug for LoaderDisplay<'_> {
     }
 }
 
-#[derive(Clone, Collect)]
+#[derive(Clone, Collect, HasPrefixField)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct LoaderDisplayData<'gc> {
-    base: RefLock<InteractiveObjectBase<'gc>>,
+    base: InteractiveObjectBase<'gc>,
     container: RefLock<ChildContainer<'gc>>,
-    avm2_object: Lock<Option<Avm2Object<'gc>>>,
+    avm2_object: Lock<Option<Avm2StageObject<'gc>>>,
     movie: Arc<SwfMovie>,
 }
 
@@ -46,15 +50,15 @@ impl<'gc> LoaderDisplay<'gc> {
         let obj = LoaderDisplay(Gc::new(
             activation.gc(),
             LoaderDisplayData {
-                base: RefLock::new(Default::default()),
-                container: RefLock::new(ChildContainer::new(movie.clone())),
+                base: Default::default(),
+                container: RefLock::new(ChildContainer::new(&movie)),
                 avm2_object: Lock::new(None),
                 movie,
             },
         ));
 
-        obj.set_placed_by_script(activation.gc(), true);
-        activation.context.avm2.add_orphan_obj(obj.into());
+        obj.set_placed_by_avm2_script(true);
+        activation.context.orphan_manager.add_orphan_obj(obj.into());
         obj
     }
 
@@ -64,91 +68,81 @@ impl<'gc> LoaderDisplay<'gc> {
 }
 
 impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
-    fn base(&self) -> Ref<DisplayObjectBase<'gc>> {
-        Ref::map(self.raw_interactive(), |r| &r.base)
+    fn base(self) -> Gc<'gc, DisplayObjectBase<'gc>> {
+        HasPrefixField::as_prefix_gc(self.raw_interactive())
     }
 
-    fn base_mut<'a>(&'a self, mc: &Mutation<'gc>) -> RefMut<'a, DisplayObjectBase<'gc>> {
-        RefMut::map(self.raw_interactive_mut(mc), |w| &mut w.base)
-    }
-
-    fn instantiate(&self, gc_context: &Mutation<'gc>) -> DisplayObject<'gc> {
+    fn instantiate(self, gc_context: &Mutation<'gc>) -> DisplayObject<'gc> {
         Self(Gc::new(gc_context, self.0.as_ref().clone())).into()
     }
 
-    fn as_ptr(&self) -> *const DisplayObjectPtr {
-        Gc::as_ptr(self.0) as *const DisplayObjectPtr
-    }
-
-    fn id(&self) -> CharacterId {
+    fn id(self) -> CharacterId {
         u16::MAX
     }
 
-    fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
+    fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
         self.render_children(context);
     }
 
-    fn self_bounds(&self) -> Rectangle<Twips> {
+    fn self_bounds(self, _mode: BoundsMode) -> Rectangle<Twips> {
         Default::default()
     }
 
-    fn object2(&self) -> Avm2Value<'gc> {
-        self.0
-            .avm2_object
-            .get()
-            .map(Avm2Value::from)
-            .unwrap_or(Avm2Value::Null)
+    fn object1(self) -> Option<crate::avm1::Object<'gc>> {
+        None
     }
 
-    fn set_object2(&self, context: &mut UpdateContext<'gc>, to: Avm2Object<'gc>) {
+    fn object2(self) -> Option<Avm2StageObject<'gc>> {
+        self.0.avm2_object.get()
+    }
+
+    fn set_object2(self, context: &mut UpdateContext<'gc>, to: Avm2StageObject<'gc>) {
         let mc = context.gc();
         unlock!(Gc::write(mc, self.0), LoaderDisplayData, avm2_object).set(Some(to))
     }
 
-    fn as_container(self) -> Option<DisplayObjectContainer<'gc>> {
-        Some(self.into())
-    }
-
-    fn as_interactive(self) -> Option<InteractiveObject<'gc>> {
-        Some(self.into())
-    }
-
-    fn enter_frame(&self, context: &mut UpdateContext<'gc>) {
+    fn enter_frame(self, context: &mut UpdateContext<'gc>) {
         let skip_frame = self.base().should_skip_next_enter_frame();
         for child in self.iter_render_list() {
             // See MovieClip::enter_frame for an explanation of this.
             if skip_frame {
-                child.base_mut(context.gc()).set_skip_next_enter_frame(true);
+                child.base().set_skip_next_enter_frame(true);
             }
             child.enter_frame(context);
         }
-        self.base_mut(context.gc()).set_skip_next_enter_frame(false);
+        self.base().set_skip_next_enter_frame(false);
     }
 
-    fn construct_frame(&self, context: &mut UpdateContext<'gc>) {
+    fn construct_frame(self, context: &mut UpdateContext<'gc>) {
         for child in self.iter_render_list() {
             child.construct_frame(context);
         }
     }
 
-    fn movie(&self) -> Arc<SwfMovie> {
+    fn post_instantiation(
+        self,
+        context: &mut UpdateContext<'gc>,
+        _init_object: Option<Avm1Object<'gc>>,
+        _instantiated_by: Instantiator,
+        _run_frame: bool,
+    ) {
+        self.set_default_instance_name(context);
+    }
+
+    fn movie(self) -> Arc<SwfMovie> {
         self.0.movie.clone()
     }
 
-    fn on_parent_removed(&self, context: &mut UpdateContext<'gc>) {
+    fn on_parent_removed(self, context: &mut UpdateContext<'gc>) {
         if self.movie().is_action_script_3() {
-            context.avm2.add_orphan_obj((*self).into())
+            context.orphan_manager.add_orphan_obj(self.into())
         }
     }
 }
 
 impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
-    fn raw_interactive(&self) -> Ref<InteractiveObjectBase<'gc>> {
-        self.0.base.borrow()
-    }
-
-    fn raw_interactive_mut(&self, mc: &Mutation<'gc>) -> RefMut<InteractiveObjectBase<'gc>> {
-        unlock!(Gc::write(mc, self.0), LoaderDisplayData, base).borrow_mut()
+    fn raw_interactive(self) -> Gc<'gc, InteractiveObjectBase<'gc>> {
+        HasPrefixField::as_prefix_gc(self.0)
     }
 
     fn as_displayobject(self) -> DisplayObject<'gc> {
@@ -175,7 +169,7 @@ impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
     }
 
     fn mouse_pick_avm1(
-        &self,
+        self,
         context: &mut UpdateContext<'gc>,
         point: Point<Twips>,
         require_button_mode: bool,
@@ -204,7 +198,7 @@ impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
     }
 
     fn mouse_pick_avm2(
-        &self,
+        self,
         context: &mut UpdateContext<'gc>,
         point: Point<Twips>,
         require_button_mode: bool,
@@ -217,36 +211,28 @@ impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
         let mut options = HitTestOptions::SKIP_INVISIBLE;
         options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
 
-        // We have at most one child
-        if let Some(child) = self.iter_render_list().next() {
-            if let Some(int) = child.as_interactive() {
-                if int.as_displayobject().movie().is_action_script_3() {
-                    let res = int
-                        .mouse_pick_avm2(context, point, require_button_mode)
-                        .combine_with_parent((*self).into());
-                    if let Avm2MousePick::Hit(target) = res {
-                        if std::ptr::eq(target.as_displayobject().as_ptr(), child.as_ptr()) {
-                            if self.mouse_enabled() {
-                                return Avm2MousePick::Hit((*self).into());
-                            } else {
-                                return Avm2MousePick::PropagateToParent;
-                            }
+        if self.visible() {
+            // We have at most one child
+            if let Some(child) = self.iter_render_list().next() {
+                if let Some(int) = child.as_interactive() {
+                    if int.as_displayobject().movie().is_action_script_3() {
+                        return int
+                            .mouse_pick_avm2(context, point, require_button_mode)
+                            .combine_with_parent(self.into());
+                    } else {
+                        let avm1_result = int.mouse_pick_avm1(context, point, require_button_mode);
+                        if let Some(result) = avm1_result {
+                            return Avm2MousePick::Hit(result);
+                        } else {
+                            return Avm2MousePick::Miss;
                         }
                     }
-                    return res;
-                } else {
-                    let avm1_result = int.mouse_pick_avm1(context, point, require_button_mode);
-                    if let Some(result) = avm1_result {
-                        return Avm2MousePick::Hit(result);
+                } else if child.hit_test_shape(context, point, options) {
+                    if self.mouse_enabled() {
+                        return Avm2MousePick::Hit(self.into());
                     } else {
-                        return Avm2MousePick::Miss;
+                        return Avm2MousePick::PropagateToParent;
                     }
-                }
-            } else if child.hit_test_shape(context, point, options) {
-                if self.mouse_enabled() {
-                    return Avm2MousePick::Hit((*self).into());
-                } else {
-                    return Avm2MousePick::PropagateToParent;
                 }
             }
         }

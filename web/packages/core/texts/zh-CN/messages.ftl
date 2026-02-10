@@ -1,6 +1,9 @@
 message-cant-embed =
     Ruffle 无法运行嵌入在此页面中的 Flash。
     您可以尝试在单独的标签页中打开该文件，以回避此问题。
+message-restored-from-bfcache =
+    您的浏览器从之前的会话中恢复了这个Flash内容。
+    若要从头开始播放，请重新加载页面。
 panic-title = 出了些问题 :(
 more-info = 更多信息
 run-anyway = 仍然运行
@@ -77,7 +80,7 @@ error-javascript-conflict =
     Ruffle 在试图初始化时遇到了一个重大问题。
     这个页面似乎使用了与 Ruffle 冲突的 JavaScript 代码。
     如果您是服务器管理员，我们建议您尝试在空白页面上加载文件。
-error-javascript-conflict-outdated = 您还可以尝试上传可能规避该问题的最新版本的 (当前构建已过时: { $buildDate })。
+error-javascript-conflict-outdated = 您也可以尝试上传可能规避此问题的较新版本的 Ruffle (当前构建版本已过时: { $buildDate })。
 error-csp-conflict =
     Ruffle 在试图初始化时遇到了一个重大问题。
     该网站服务器的内容安全策略不允许运行所需的 “.wasm” 组件。

@@ -2,12 +2,12 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    parse_macro_input, parse_quote, FnArg, ImplItem, ImplItemFn, ItemEnum, ItemTrait, LitStr, Meta,
-    Pat, TraitItem, Visibility,
+    DeriveInput, FnArg, ImplItem, ImplItemFn, ItemEnum, ItemTrait, LitStr, Meta, Pat, TraitItem,
+    Visibility, parse_macro_input, parse_quote,
 };
 
 /// Define an enum whose variants each implement a trait.
@@ -18,6 +18,9 @@ use syn::{
 /// This will auto-implement the trait for the enum, delegating all methods to the
 /// underlying type. Additionally, `From` will be implemented for all of the variants,
 /// so an underlying type can easily be converted into the enum.
+///
+/// Methods can be individually marked with `#[no_dynamic]`, which will exempt them from
+/// being dynamically dispatched, preventing implementors from overriding them.
 ///
 /// TODO: This isn't completely robust for all cases, but should be good enough
 /// for our usage.
@@ -62,15 +65,64 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
         "Trait and enum should have the same generic parameters"
     );
 
+    /// An hacky way to prevent accidental method overriding.
+    ///
+    /// We modify the method signature to include a 'dummy' lifetime, which doesn't
+    /// disrupt callers but forces implementors to mention a pub-in-private trait.
+    ///
+    /// This isn't fool-proof (an implementor in a submodule of the trait's module
+    /// can still manually write the modified signature), and the error messages
+    /// aren't great, but this is good enough for us.
+    struct NoOverrideModule {
+        mod_name: syn::Ident,
+        lt: syn::Lifetime,
+        contents: TokenStream2,
+    }
+
+    impl NoOverrideModule {
+        fn make(trait_name: &syn::Ident) -> Self {
+            let mod_name = syn::Ident::new(
+                &format!("__{trait_name}_do_not_override"),
+                Span::call_site(),
+            );
+            let lt = syn::Lifetime::new("'no_dyn", Span::call_site());
+            let contents = quote! {
+                #[automatically_derived]
+                #[doc(hidden)]
+                mod #mod_name {
+                    pub trait NoDyn<#lt> {}
+                    impl NoDyn<'_> for () {}
+                }
+            };
+            Self {
+                mod_name,
+                lt,
+                contents,
+            }
+        }
+
+        fn adjust_method(&self, method: &mut syn::TraitItemFn) {
+            let Self { mod_name, lt, .. } = self;
+            let generics = &mut method.sig.generics;
+            generics
+                .params
+                .insert(0, syn::LifetimeParam::new(lt.clone()).into());
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!((): #mod_name::NoDyn<#lt>));
+        }
+    }
+
+    let mut no_override: Option<NoOverrideModule> = None;
+
     // Implement each trait. This will match against each enum variant and delegate
     // to the underlying type.
     let trait_methods: Vec<_> = input_trait
         .items
         .iter_mut()
-        .filter_map(|item| match item {
-            TraitItem::Fn(ref mut method) => {
-                let method_name = &method.sig.ident;
-
+        .map(|item| match item {
+            TraitItem::Fn(method) => {
                 let mut is_no_dynamic = false;
 
                 method.attrs.retain(|attr| match &attr.meta {
@@ -88,50 +140,71 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
                     _ => true,
                 });
 
-                if is_no_dynamic {
-                    // Don't create this method as a dynamic-dispatch method
-                    return None;
-                }
-
                 let params: Vec<_> = method
                     .sig
                     .inputs
                     .iter()
                     .filter_map(|arg| {
-                        if let FnArg::Typed(arg) = arg {
-                            if let Pat::Ident(i) = &*arg.pat {
-                                let arg_name = &i.ident;
-                                return Some(quote!(#arg_name,));
-                            }
+                        if let FnArg::Typed(arg) = arg && let Pat::Ident(i) = &*arg.pat {
+                            return Some(i.ident.clone());
                         }
                         None
                     })
                     .collect();
 
-                let match_arms: Vec<_> = enum_input
-                    .variants
-                    .iter()
-                    .map(|variant| {
-                        let variant_name = &variant.ident;
-                        quote! {
-                            #enum_name::#variant_name(o) => o.#method_name(#(#params)*),
+                let method_block = if is_no_dynamic {
+                    no_override
+                        .get_or_insert_with(|| NoOverrideModule::make(trait_name))
+                        .adjust_method(method);
+
+                    let method_name = &method.sig.ident;
+                    let deref = if let Some(syn::Receiver {
+                        colon_token: None,
+                        reference,
+                        ..
+                    }) = method.sig.receiver()
+                    {
+                        reference.is_some().then(|| quote!(*))
+                    } else {
+                        panic!("#[no_dynamic] method `{method_name}` must take `self`, `&self`, or `&mut self`")
+                    };
+
+                    // Moves the provided default body to the enum's generated trait impl,
+                    // and replace it by an impl that delegates to the enum.
+                    method
+                        .default
+                        .replace(parse_quote!({
+                            let mut o: #enum_name<'_> = (#deref self).into();
+                            o.#method_name(#(#params),*)
+                        }))
+                        .expect("#[no_dynamic] method `{method_name}` must have a default body")
+                } else {
+                    let method_name = &method.sig.ident;
+                    let match_arms: Vec<_> = enum_input
+                        .variants
+                        .iter()
+                        .map(|variant| {
+                            let variant_name = &variant.ident;
+                            quote! {
+                                #enum_name::#variant_name(o) => o.#method_name(#(#params),*),
+                            }
+                        })
+                        .collect();
+
+                    parse_quote!({
+                        match self {
+                            #(#match_arms)*
                         }
                     })
-                    .collect();
+                };
 
-                let method_block = quote!({
-                    match self {
-                        #(#match_arms)*
-                    }
-                });
-
-                Some(ImplItem::Fn(ImplItemFn {
+                ImplItem::Fn(ImplItemFn {
                     attrs: method.attrs.clone(),
                     vis: Visibility::Inherited,
                     defaultness: None,
                     sig: method.sig.clone(),
-                    block: parse_quote!(#method_block),
-                }))
+                    block: method_block,
+                })
             }
             _ => panic!("Unsupported trait item: {item:?}"),
         })
@@ -162,7 +235,10 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let no_override = no_override.map(|s| s.contents).into_iter();
     let out = quote!(
+        #(#no_override)*
+
         #input_trait
 
         #enum_input
@@ -175,6 +251,65 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     out.into()
+}
+
+#[proc_macro_derive(HasPrefixField)]
+pub fn derive_has_prefix_field(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let mut is_repr_c = false;
+    for attr in &input.attrs {
+        if attr.path().is_ident("repr") {
+            // Ignore parse errors.
+            let _ = attr.parse_nested_meta(|meta| {
+                is_repr_c = is_repr_c || meta.path.is_ident("C");
+                Ok(())
+            });
+        }
+    }
+
+    let Some(first_field) = ({
+        if let syn::Data::Struct(data) = &input.data {
+            data.fields
+                .iter()
+                .next()
+                .filter(|f| is_repr_c && f.ident.is_some())
+        } else {
+            None
+        }
+    }) else {
+        panic!(
+            "`HasPrefixField` can only be derived for repr(C) structs with at least one named field"
+        );
+    };
+
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let (ty, field_ty, field_name) = (
+        &input.ident,
+        &first_field.ty,
+        first_field.ident.as_ref().unwrap(),
+    );
+
+    quote! {
+        // SAFETY: `repr(C)` structs always have their first field at offset 0.
+        // Technically, an attribute macro executing after this derive could rewrite the struct
+        // definition (see <https://github.com/google/zerocopy/issues/388#issuecomment-1737817682>
+        // for a worked-out example), so we add post-mono checks as a latch-ditch guard.
+        #[automatically_derived]
+        unsafe impl #impl_generics
+                ruffle_common::utils::HasPrefixField<#field_ty>
+                for #ty #ty_generics #where_clause {
+            const ASSERT_PREFIX_FIELD: () = {
+                ::core::assert!(::core::mem::offset_of!(Self, #field_name) == 0);
+                // Check that the field exists and has the correct type.
+                let _ = |check: &(Self,)| -> *const #field_ty {
+                    let (Self { #field_name, .. },) = check;
+                    #field_name as *const _
+                };
+            };
+        }
+    }
+    .into()
 }
 
 /// Get the string passed to it as an interned `AvmAtom`, assumed to be present on

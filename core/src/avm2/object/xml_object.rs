@@ -1,19 +1,21 @@
 //! Object representation for XML objects
 
 use crate::avm2::activation::Activation;
-use crate::avm2::e4x::{string_to_multiname, E4XNamespace, E4XNode, E4XNodeKind};
-use crate::avm2::error::make_error_1087;
-use crate::avm2::multiname::NamespaceSet;
-use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{
-    ClassObject, NamespaceObject, Object, ObjectPtr, TObject, XmlListObject,
+use crate::avm2::e4x::{
+    E4XNamespace, E4XNode, E4XNodeKind, handle_input_multiname, namespace_for_multiname,
+    string_to_multiname,
 };
+use crate::avm2::error::make_error_1087;
+use crate::avm2::function::FunctionArgs;
+use crate::avm2::object::script_object::ScriptObjectData;
+use crate::avm2::object::{ClassObject, NamespaceObject, Object, TObject, XmlListObject};
 use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::{Error, Multiname};
 use core::fmt;
 use gc_arena::barrier::unlock;
-use gc_arena::{lock::Lock, Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::Lock};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_wstr::WString;
 
 use super::xml_list_object::{E4XOrXml, XmlOrXmlListObject};
@@ -51,7 +53,7 @@ impl fmt::Debug for XmlObject<'_> {
     }
 }
 
-#[derive(Clone, Collect)]
+#[derive(Clone, Collect, HasPrefixField)]
 #[collect(no_drop)]
 #[repr(C, align(8))]
 pub struct XmlObjectData<'gc> {
@@ -60,10 +62,6 @@ pub struct XmlObjectData<'gc> {
 
     node: Lock<E4XNode<'gc>>,
 }
-
-const _: () = assert!(std::mem::offset_of!(XmlObjectData, base) == 0);
-const _: () =
-    assert!(std::mem::align_of::<XmlObjectData>() == std::mem::align_of::<ScriptObjectData>());
 
 impl<'gc> XmlObject<'gc> {
     pub fn new(node: E4XNode<'gc>, activation: &mut Activation<'_, 'gc>) -> Self {
@@ -125,7 +123,7 @@ impl<'gc> XmlObject<'gc> {
 
     // 13.4.4.6 XML.prototype.child ( propertyName )
     pub fn child(
-        &self,
+        self,
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> XmlListObject<'gc> {
@@ -159,7 +157,7 @@ impl<'gc> XmlObject<'gc> {
     }
 
     pub fn elements(
-        &self,
+        self,
         name: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> XmlListObject<'gc> {
@@ -176,7 +174,7 @@ impl<'gc> XmlObject<'gc> {
         let list = XmlListObject::new_with_children(
             activation,
             children,
-            Some(XmlOrXmlListObject::Xml(*self)),
+            Some(XmlOrXmlListObject::Xml(self)),
             // NOTE: Spec says to set target property here, but avmplus doesn't, so we do the same.
             None,
         );
@@ -189,7 +187,7 @@ impl<'gc> XmlObject<'gc> {
         list
     }
 
-    pub fn length(&self) -> Option<usize> {
+    pub fn length(self) -> Option<usize> {
         self.node().length()
     }
 
@@ -197,12 +195,12 @@ impl<'gc> XmlObject<'gc> {
         unlock!(Gc::write(mc, self.0), XmlObjectData, node).set(node);
     }
 
-    pub fn local_name(&self) -> Option<AvmString<'gc>> {
+    pub fn local_name(self) -> Option<AvmString<'gc>> {
         self.0.node.get().local_name()
     }
 
     pub fn namespace_object(
-        &self,
+        self,
         activation: &mut Activation<'_, 'gc>,
         in_scope_ns: &[E4XNamespace<'gc>],
     ) -> Result<NamespaceObject<'gc>, Error<'gc>> {
@@ -211,26 +209,26 @@ impl<'gc> XmlObject<'gc> {
             .as_namespace_object(activation)
     }
 
-    pub fn matches_name(&self, multiname: &Multiname<'gc>) -> bool {
+    pub fn matches_name(self, multiname: &Multiname<'gc>) -> bool {
         self.0.node.get().matches_name(multiname)
     }
 
-    pub fn node(&self) -> E4XNode<'gc> {
+    pub fn node(self) -> E4XNode<'gc> {
         self.0.node.get()
     }
 
-    pub fn deep_copy(&self, activation: &mut Activation<'_, 'gc>) -> XmlObject<'gc> {
+    pub fn deep_copy(self, activation: &mut Activation<'_, 'gc>) -> XmlObject<'gc> {
         let node = self.node();
         XmlObject::new(node.deep_copy(activation.gc()), activation)
     }
 
-    pub fn as_xml_string(&self, activation: &mut Activation<'_, 'gc>) -> AvmString<'gc> {
+    pub fn as_xml_string(self, activation: &mut Activation<'_, 'gc>) -> AvmString<'gc> {
         let node = self.node();
         node.xml_to_xml_string(activation)
     }
 
     pub fn equals(
-        &self,
+        self,
         other: &Value<'gc>,
         _activation: &mut Activation<'_, 'gc>,
     ) -> Result<bool, Error<'gc>> {
@@ -242,18 +240,18 @@ impl<'gc> XmlObject<'gc> {
         };
 
         // It seems like an XML object should always be equal to itself
-        if Object::ptr_eq(*self, other) {
+        if Object::ptr_eq(self, other) {
             return Ok(true);
         }
 
         let node = other.node();
-        Ok(self.node().equals(&node))
+        Ok(self.node().equals(node))
     }
 
     // Implements "The Abstract Equality Comparison Algorithm" as defined
     // in ECMA-357 when one side is an XML type (object).
     pub fn abstract_eq(
-        &self,
+        self,
         other: &Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<bool, Error<'gc>> {
@@ -290,19 +288,7 @@ impl<'gc> XmlObject<'gc> {
 
 impl<'gc> TObject<'gc> for XmlObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
-        // SAFETY: Object data is repr(C), and a compile-time assert ensures
-        // that the ScriptObjectData stays at offset 0 of the struct- so the
-        // layouts are compatible
-
-        unsafe { Gc::cast(self.0) }
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_xml_object(&self) -> Option<Self> {
-        Some(*self)
+        HasPrefixField::as_prefix_gc(self.0)
     }
 
     fn xml_descendants(
@@ -310,8 +296,10 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         multiname: &Multiname<'gc>,
     ) -> Option<XmlListObject<'gc>> {
+        let multiname = handle_input_multiname(multiname.clone(), activation);
         let mut descendants = Vec::new();
-        self.0.node.get().descendants(multiname, &mut descendants);
+
+        self.0.node.get().descendants(&multiname, &mut descendants);
 
         let list = XmlListObject::new_with_children(activation, descendants, None, None);
         // NOTE: avmplus does not set a target property/object here, but if there was at least one child
@@ -351,11 +339,9 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
     fn call_property_local(
         self,
         multiname: &Multiname<'gc>,
-        arguments: &[Value<'gc>],
+        arguments: FunctionArgs<'_, 'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        let this = self.as_xml_object().unwrap();
-
         let method = Value::from(self.proto().expect("XMLList missing prototype"))
             .get_property(multiname, activation)?;
 
@@ -370,8 +356,8 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             // Compare to the very similar case in XMLListObject::call_property_local
             let prop = self.get_property_local(multiname, activation)?;
             if let Some(list) = prop.as_object().and_then(|obj| obj.as_xml_list_object()) {
-                if list.length() == 0 && this.node().has_simple_content() {
-                    let receiver = Value::String(this.node().xml_to_string(activation));
+                if list.length() == 0 && self.node().has_simple_content() {
+                    let receiver = Value::String(self.node().xml_to_string(activation));
 
                     return receiver.call_property(multiname, arguments, activation);
                 }
@@ -498,7 +484,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
             let mc = activation.gc();
             self.delete_property_local(activation, &name)?;
             let Some(local_name) = name.local_name() else {
-                return Err(format!("Cannot set attribute {:?} without a local name", name).into());
+                return Err(format!("Cannot set attribute {name:?} without a local name").into());
             };
             let ns = name.explicit_namespace().map(E4XNamespace::new_uri);
             let new_attr = E4XNode::attribute(mc, ns, local_name, value, Some(self.node()));
@@ -555,7 +541,7 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
                 // 12.b.iii. Create a new XML object y with y.[[Name]] = name, y.[[Class]] = "element" and y.[[Parent]] = x
                 let node = E4XNode::element(
                     activation.gc(),
-                    name.explicit_namespace().map(E4XNamespace::new_uri),
+                    namespace_for_multiname(&name, activation),
                     name.local_name().unwrap(),
                     Some(self_node),
                 );
@@ -702,40 +688,4 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
         // 7. Return true.
         Ok(true)
     }
-}
-
-fn handle_input_multiname<'gc>(
-    name: Multiname<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-) -> Multiname<'gc> {
-    // Special case to handle code like: xml["@attr"]
-    // FIXME: Figure out the exact semantics.
-    // NOTE: It is very important the code within the if-statement is not run
-    // when the passed name has the Any namespace. Otherwise, we run the risk of
-    // creating a NamespaceSet::Multiple with an Any namespace in it.
-    if !name.has_explicit_namespace()
-        && !name.is_attribute()
-        && !name.is_any_name()
-        && !name.is_any_namespace()
-    {
-        if let Some(mut new_name) = name
-            .local_name()
-            .map(|name| string_to_multiname(activation, name))
-        {
-            // Copy the namespaces from the previous name,
-            // but make sure to definitely include the public namespace.
-            if !new_name.is_any_namespace() {
-                let mut ns = Vec::new();
-                ns.extend(name.namespace_set());
-                if !name.contains_public_namespace() {
-                    ns.push(activation.avm2().namespaces.public_all());
-                }
-                new_name.set_ns(NamespaceSet::new(ns, activation.gc()));
-            }
-
-            return new_name;
-        }
-    }
-
-    name
 }

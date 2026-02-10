@@ -16,11 +16,11 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use crate::bitmaps::WgpuSamplerConfig;
-use crate::context3d::shader_pair::{ShaderCompileData, ShaderTextureInfo};
 use crate::context3d::VertexBufferWrapper;
+use crate::context3d::shader_pair::{ShaderCompileData, ShaderTextureInfo};
 use crate::descriptors::Descriptors;
 
-use super::{ShaderPairAgal, VertexAttributeInfo, MAX_VERTEX_ATTRIBUTES};
+use super::{MAX_VERTEX_ATTRIBUTES, ShaderPairAgal, VertexAttributeInfo};
 
 const AGAL_NUM_VERTEX_CONSTANTS: u64 = 128;
 const AGAL_NUM_FRAGMENT_CONSTANTS: u64 = 28;
@@ -573,14 +573,14 @@ impl CurrentPipeline {
 }
 
 // This is useful for debugging shader issues
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn to_wgsl(module: &naga::Module) -> String {
     let mut out = String::new();
 
     let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
     let module_info = validator
         .validate(module)
-        .unwrap_or_else(|e| panic!("Validation failed: {:#?}", e));
+        .unwrap_or_else(|e| panic!("Validation failed: {e:#?}"));
 
     let mut writer =
         naga::back::wgsl::Writer::new(&mut out, naga::back::wgsl::WriterFlags::EXPLICIT_TYPES);

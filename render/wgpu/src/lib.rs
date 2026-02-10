@@ -12,7 +12,7 @@ use crate::mesh::BitmapBinds;
 use crate::pipelines::Pipelines;
 use crate::target::{RenderTarget, SwapChainTarget};
 use crate::utils::{
-    capture_image, create_buffer_with_data, format_list, get_backend_names, BufferDimensions,
+    BufferDimensions, capture_image, create_buffer_with_data, format_list, get_backend_names,
 };
 use bytemuck::{Pod, Zeroable};
 use descriptors::Descriptors;
@@ -21,6 +21,7 @@ use ruffle_render::backend::RawTexture;
 use ruffle_render::bitmap::{BitmapHandle, BitmapHandleImpl, PixelRegion, SyncHandle};
 use ruffle_render::shape_utils::GradientType;
 use ruffle_render::tessellator::{Gradient as TessGradient, Vertex as TessVertex};
+use std::any::Any;
 use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
 use swf::GradientSpread;
@@ -55,11 +56,11 @@ mod surface;
 impl BitmapHandleImpl for Texture {}
 
 pub fn as_texture(handle: &BitmapHandle) -> &Texture {
-    <dyn BitmapHandleImpl>::downcast_ref(&*handle.0).unwrap()
+    <dyn Any>::downcast_ref(&*handle.0).unwrap()
 }
 
 pub fn raw_texture_as_texture(handle: &dyn RawTexture) -> &wgpu::Texture {
-    <dyn RawTexture>::downcast_ref(handle).unwrap()
+    <dyn Any>::downcast_ref(handle).unwrap()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]

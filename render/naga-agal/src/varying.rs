@@ -3,7 +3,7 @@ use naga::{
     StructMember, Type, TypeInner,
 };
 
-use crate::{builder::NagaBuilder, Error, ShaderType};
+use crate::{Error, ShaderType, builder::NagaBuilder};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -60,7 +60,7 @@ impl NagaBuilder<'_> {
                                     location: index as u32,
                                     interpolation: Some(naga::Interpolation::Perspective),
                                     sampling: None,
-                                    second_blend_source: false,
+                                    blend_src: None,
                                 }),
                                 offset: 0,
                             });
@@ -86,7 +86,7 @@ impl NagaBuilder<'_> {
                             location: index as u32,
                             interpolation: Some(Interpolation::Perspective),
                             sampling: None,
-                            second_blend_source: false,
+                            blend_src: None,
                         }),
                     });
                     let arg_index = self.func.arguments.len() - 1;

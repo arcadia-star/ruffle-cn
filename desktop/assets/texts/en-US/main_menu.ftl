@@ -8,7 +8,8 @@
 # This is because some languages may use different wording for one or the other, especially with things like capitalisation.
 
 file-menu = File
-file-menu-open-quick = Open...
+file-menu-open-file = Open File...
+file-menu-open-directory = Open Folder...
 file-menu-open-advanced = Open Advanced...
 file-menu-close = Close
 file-menu-reload = Reload
@@ -16,6 +17,7 @@ file-menu-recents = Recents
 file-menu-recents-empty = No recent entries
 file-menu-preferences = Preferences...
 file-menu-exit = Exit
+file-menu-export = Export...
 
 controls-menu = Controls
 controls-menu-suspend = Suspend
@@ -36,6 +38,7 @@ bookmarks-menu-manage = Manage Bookmarks...
 
 debug-menu = Debug Tools
 debug-menu-open-stage = View Stage Info
+debug-menu-open-root-movie-clip = View Root MovieClip
 debug-menu-open-movie = View Movie
 debug-menu-open-movie-list = Show Known Movies
 debug-menu-open-domain-list = Show Domains

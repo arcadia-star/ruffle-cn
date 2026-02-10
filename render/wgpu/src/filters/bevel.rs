@@ -151,7 +151,7 @@ impl BevelFilter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn apply(
         &self,
         descriptors: &Descriptors,
@@ -290,7 +290,6 @@ impl BevelFilter {
             wgpu::IndexFormat::Uint32,
         );
         render_pass.draw_indexed(0..6, 0, 0..1);
-        drop(render_pass);
         target
     }
 }

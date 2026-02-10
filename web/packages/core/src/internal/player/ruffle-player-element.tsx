@@ -76,7 +76,7 @@ export class RufflePlayerElement extends HTMLElement implements PlayerElement {
     }
 
     static get observedAttributes(): string[] {
-        return ["width", "height"];
+        return ["width", "height", "align"];
     }
 
     attributeChangedCallback(
@@ -84,7 +84,7 @@ export class RufflePlayerElement extends HTMLElement implements PlayerElement {
         _oldValue: string | undefined,
         _newValue: string | undefined,
     ): void {
-        if (name === "width" || name === "height") {
+        if (RufflePlayerElement.observedAttributes.includes(name)) {
             this.#inner.updateStyles();
         }
     }
@@ -199,7 +199,7 @@ export function copyElement(element: Element, destination: Element): void {
 
                 try {
                     destination.setAttribute(attribute.name, attribute.value);
-                } catch (err) {
+                } catch (_err) {
                     // The embed may have invalid attributes, so handle these gracefully.
                     console.warn(
                         `Unable to set attribute ${attribute.name} on Ruffle instance`,

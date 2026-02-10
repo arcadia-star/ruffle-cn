@@ -4,14 +4,16 @@ use crate::bitmap::{Bitmap, BitmapHandle, BitmapSource, PixelRegion, RgbaBufRead
 use crate::commands::CommandList;
 use crate::error::Error;
 use crate::filters::Filter;
-use crate::pixel_bender::{PixelBenderShader, PixelBenderShaderArgument, PixelBenderShaderHandle};
+use crate::pixel_bender::{PixelBenderShader, PixelBenderShaderHandle};
+use crate::pixel_bender_support::PixelBenderShaderArgument;
 use crate::quality::StageQuality;
 use crate::shape_utils::DistilledShape;
-use downcast_rs::{impl_downcast, Downcast};
 use ruffle_wstr::WStr;
+use std::any::Any;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::Debug;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
 use swf::{Color, Rectangle, Twips};
@@ -23,7 +25,7 @@ pub struct BitmapCacheEntry {
     pub filters: Vec<Filter>,
 }
 
-pub trait RenderBackend: Downcast {
+pub trait RenderBackend: Any {
     fn viewport_dimensions(&self) -> ViewportDimensions;
     // Do not call this method directly - use `player.set_viewport_dimensions`,
     // which will ensure that the stage is properly updated as well.
@@ -54,7 +56,7 @@ pub trait RenderBackend: Downcast {
         _source_point: (u32, u32),
         _source_size: (u32, u32),
         _destination: BitmapHandle,
-        _dest_point: (u32, u32),
+        _dest_point: (i32, i32),
         _filter: Filter,
     ) -> Option<Box<dyn SyncHandle>> {
         None
@@ -75,18 +77,21 @@ pub trait RenderBackend: Downcast {
         cache_entries: Vec<BitmapCacheEntry>,
     );
 
-    fn create_empty_texture(&mut self, width: u32, height: u32) -> Result<BitmapHandle, Error>;
+    fn create_empty_texture(
+        &mut self,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> Result<BitmapHandle, Error>;
 
-    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error>;
+    fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error>;
     fn update_texture(
         &mut self,
         handle: &BitmapHandle,
-        bitmap: Bitmap,
+        bitmap: Bitmap<'_>,
         region: PixelRegion,
     ) -> Result<(), Error>;
 
     fn create_context3d(&mut self, profile: Context3DProfile) -> Result<Box<dyn Context3D>, Error>;
-    fn context3d_present(&mut self, context: &mut dyn Context3D) -> Result<(), Error>;
 
     fn debug_info(&self) -> Cow<'static, str>;
     /// An internal name that is used to identify the render-backend.
@@ -112,7 +117,6 @@ pub trait RenderBackend: Downcast {
         with_rgba: RgbaBufRead,
     ) -> Result<(), Error>;
 }
-impl_downcast!(RenderBackend);
 
 pub enum PixelBenderTarget {
     // The shader will write to the provided bitmap texture,
@@ -129,29 +133,24 @@ pub enum PixelBenderOutput {
     Bytes(Vec<u8>),
 }
 
-pub trait IndexBuffer: Downcast {}
-impl_downcast!(IndexBuffer);
-pub trait VertexBuffer: Downcast {}
-impl_downcast!(VertexBuffer);
+pub trait IndexBuffer: Any {}
+pub trait VertexBuffer: Any {}
 
-pub trait ShaderModule: Downcast {}
-impl_downcast!(ShaderModule);
+pub trait ShaderModule: Any {}
 
-pub trait Texture: Downcast + Debug {
+pub trait Texture: Any + Debug {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
 }
-impl_downcast!(Texture);
 
-pub trait RawTexture: Downcast + Debug {
+pub trait RawTexture: Any + Debug {
     fn equals(&self, other: &dyn RawTexture) -> bool;
 }
-impl_downcast!(RawTexture);
 
 #[cfg(feature = "wgpu")]
 impl RawTexture for wgpu::Texture {
     fn equals(&self, other: &dyn RawTexture) -> bool {
-        if let Some(other_texture) = other.downcast_ref::<wgpu::Texture>() {
+        if let Some(other_texture) = (other as &dyn Any).downcast_ref::<wgpu::Texture>() {
             std::ptr::eq(self, other_texture)
         } else {
             false
@@ -241,7 +240,7 @@ pub enum ProgramType {
     Fragment,
 }
 
-pub trait Context3D: Downcast {
+pub trait Context3D: Any {
     fn profile(&self) -> Context3DProfile;
     // The BitmapHandle for the texture we're rendering to
     fn bitmap_handle(&self) -> BitmapHandle;
@@ -258,7 +257,7 @@ pub trait Context3D: Downcast {
     fn disposed_vertex_buffer_handle(&self) -> Rc<dyn VertexBuffer>;
 
     fn create_index_buffer(&mut self, usage: BufferUsage, num_indices: u32)
-        -> Box<dyn IndexBuffer>;
+    -> Box<dyn IndexBuffer>;
     fn create_vertex_buffer(
         &mut self,
         usage: BufferUsage,
@@ -283,8 +282,9 @@ pub trait Context3D: Downcast {
     ) -> Result<Rc<dyn Texture>, Error>;
 
     fn process_command(&mut self, command: Context3DCommand<'_>);
+
+    fn present(&mut self);
 }
-impl_downcast!(Context3D);
 
 #[derive(Copy, Clone, Debug)]
 pub enum Context3DVertexBufferFormat {
@@ -451,14 +451,14 @@ pub enum Context3DCommand<'a> {
     UploadToIndexBuffer {
         buffer: &'a mut dyn IndexBuffer,
         start_offset: usize,
-        data: Vec<u8>,
+        data: &'a [u8],
     },
 
     UploadToVertexBuffer {
         buffer: Rc<dyn VertexBuffer>,
         start_vertex: usize,
         data32_per_vertex: u8,
-        data: Vec<u8>,
+        data: &'a [u8],
     },
 
     DrawTriangles {
@@ -491,7 +491,7 @@ pub enum Context3DCommand<'a> {
         face: Context3DTriangleFace,
     },
     CopyBitmapToTexture {
-        source: Vec<u8>,
+        source: &'a [u8],
         source_width: u32,
         source_height: u32,
         dest: Rc<dyn Texture>,
@@ -529,8 +529,7 @@ pub enum Context3DCommand<'a> {
 #[derive(Clone, Debug)]
 pub struct ShapeHandle(pub Arc<dyn ShapeHandleImpl>);
 
-pub trait ShapeHandleImpl: Downcast + Debug {}
-impl_downcast!(ShapeHandleImpl);
+pub trait ShapeHandleImpl: Any + Debug {}
 
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

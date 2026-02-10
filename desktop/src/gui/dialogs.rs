@@ -1,17 +1,20 @@
 mod about_dialog;
 mod bookmarks_dialog;
+pub mod export_bundle_dialog;
 pub mod filesystem_access_dialog;
 pub mod message_dialog;
 pub mod network_access_dialog;
 mod open_dialog;
 mod open_url_dialog;
 mod preferences_dialog;
+pub mod select_path_dialog;
 mod volume_controls;
 
 use crate::custom_event::RuffleEvent;
 use crate::player::LaunchOptions;
 use crate::preferences::GlobalPreferences;
 use bookmarks_dialog::{BookmarkAddDialog, BookmarksDialog};
+use export_bundle_dialog::{ExportBundleDialog, ExportBundleDialogConfiguration};
 use filesystem_access_dialog::{FilesystemAccessDialog, FilesystemAccessDialogConfiguration};
 use message_dialog::{MessageDialog, MessageDialogConfiguration};
 use network_access_dialog::{NetworkAccessDialog, NetworkAccessDialogConfiguration};
@@ -19,9 +22,10 @@ use open_dialog::OpenDialog;
 use open_url_dialog::OpenUrlDialog;
 use preferences_dialog::PreferencesDialog;
 use ruffle_core::Player;
+use ruffle_frontend_utils::content::ContentDescriptor;
+use select_path_dialog::{SelectPathDialog, SelectPathDialogConfiguration};
 use std::{collections::VecDeque, sync::Weak};
 use unic_langid::LanguageIdentifier;
-use url::Url;
 use volume_controls::VolumeControls;
 use winit::event_loop::EventLoopProxy;
 
@@ -36,6 +40,8 @@ pub struct Dialogs {
     bookmark_add_dialog: Option<BookmarkAddDialog>,
     open_url_dialog: Option<OpenUrlDialog>,
     message_dialog: Option<MessageDialog>,
+    export_bundle_dialog: Option<ExportBundleDialog>,
+    pick_path_dialog: Option<SelectPathDialog>,
 
     // Use a queue for the following dialogs in order to:
     //  1. support handling multiple instances of them,
@@ -61,23 +67,27 @@ pub enum DialogDescriptor {
     ShowMessage(MessageDialogConfiguration),
     NetworkAccess(NetworkAccessDialogConfiguration),
     FilesystemAccess(FilesystemAccessDialogConfiguration),
+    ExportBundle(Box<ExportBundleDialogConfiguration>),
+    SelectPath(SelectPathDialogConfiguration),
 }
 
 impl Dialogs {
     pub fn new(
         preferences: GlobalPreferences,
         player_options: LaunchOptions,
-        default_path: Option<Url>,
+        default_content: Option<ContentDescriptor>,
         window: Weak<winit::window::Window>,
         event_loop: EventLoopProxy<RuffleEvent>,
     ) -> Self {
-        let picker = FilePicker::new(window, preferences.clone());
+        let picker = FilePicker::new(window, preferences.clone(), event_loop.clone());
         Self {
             preferences_dialog: None,
             bookmarks_dialog: None,
             bookmark_add_dialog: None,
             open_url_dialog: None,
             message_dialog: None,
+            export_bundle_dialog: None,
+            pick_path_dialog: None,
 
             network_access_dialog_queue: VecDeque::new(),
             filesystem_access_dialog: None,
@@ -85,7 +95,7 @@ impl Dialogs {
 
             open_dialog: OpenDialog::new(
                 player_options,
-                default_path,
+                default_content,
                 picker.clone(),
                 event_loop.clone(),
             ),
@@ -119,11 +129,12 @@ impl Dialogs {
     pub fn recreate_open_dialog(
         &mut self,
         opt: LaunchOptions,
-        url: Option<Url>,
+        content_descriptor: Option<ContentDescriptor>,
         event_loop: EventLoopProxy<RuffleEvent>,
     ) {
         self.is_open_dialog_visible = false;
-        self.open_dialog = OpenDialog::new(opt, url, self.picker.clone(), event_loop);
+        self.open_dialog =
+            OpenDialog::new(opt, content_descriptor, self.picker.clone(), event_loop);
     }
 
     pub fn open_file_advanced(&mut self) {
@@ -142,10 +153,10 @@ impl Dialogs {
         ));
     }
 
-    pub fn open_add_bookmark(&mut self, initial_url: Option<url::Url>) {
+    pub fn open_add_bookmark(&mut self, content_descriptor: Option<ContentDescriptor>) {
         self.bookmark_add_dialog = Some(BookmarkAddDialog::new(
             self.preferences.clone(),
-            initial_url,
+            content_descriptor,
             self.picker.clone(),
         ))
     }
@@ -156,6 +167,14 @@ impl Dialogs {
 
     pub fn open_about_screen(&mut self) {
         self.is_about_visible = true;
+    }
+
+    pub fn saved_content_descriptor(&self) -> Option<ContentDescriptor> {
+        self.open_dialog.content_descriptor()
+    }
+
+    pub fn saved_launch_options(&self) -> &LaunchOptions {
+        self.open_dialog.options()
     }
 
     pub fn open_dialog(&mut self, event: DialogDescriptor) {
@@ -171,6 +190,13 @@ impl Dialogs {
                 .push_back(NetworkAccessDialog::new(config)),
             DialogDescriptor::FilesystemAccess(config) => {
                 self.filesystem_access_dialog_queue.push_back(config)
+            }
+            DialogDescriptor::ExportBundle(config) => {
+                self.export_bundle_dialog =
+                    Some(ExportBundleDialog::new(*config, self.file_picker()))
+            }
+            DialogDescriptor::SelectPath(config) => {
+                self.pick_path_dialog = Some(SelectPathDialog::new(config));
             }
         }
     }
@@ -191,6 +217,8 @@ impl Dialogs {
         self.show_message_dialog(locale, egui_ctx);
         self.show_network_access_dialog(locale, egui_ctx);
         self.show_filesystem_access_dialog(locale, egui_ctx);
+        self.show_export_bundle_dialog(locale, egui_ctx);
+        self.show_pick_path_dialog(locale, egui_ctx);
     }
 
     fn show_open_dialog(&mut self, locale: &LanguageIdentifier, egui_ctx: &egui::Context) {
@@ -310,6 +338,28 @@ impl Dialogs {
                 .filesystem_access_dialog_queue
                 .pop_front()
                 .map(FilesystemAccessDialog::new);
+        }
+    }
+
+    fn show_export_bundle_dialog(&mut self, locale: &LanguageIdentifier, egui_ctx: &egui::Context) {
+        let keep_open = if let Some(dialog) = &mut self.export_bundle_dialog {
+            dialog.show(locale, egui_ctx)
+        } else {
+            true
+        };
+        if !keep_open {
+            self.export_bundle_dialog = None;
+        }
+    }
+
+    fn show_pick_path_dialog(&mut self, locale: &LanguageIdentifier, egui_ctx: &egui::Context) {
+        let keep_open = if let Some(dialog) = &mut self.pick_path_dialog {
+            dialog.show(locale, egui_ctx)
+        } else {
+            true
+        };
+        if !keep_open {
+            self.pick_path_dialog = None;
         }
     }
 }

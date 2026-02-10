@@ -26,6 +26,12 @@
     "settings_log_level_info": {
         "message": "Info"
     },
+    "settings_log_level_debug": {
+        "message": "Ladění"
+    },
+    "settings_log_level_trace": {
+        "message": "Trasování"
+    },
     "settings_max_execution_duration": {
         "message": "Maximální povolená doba spuštění ActionScript (v sekundách)"
     },
@@ -37,6 +43,9 @@
     },
     "settings_preferred_renderer_auto": {
         "message": "Automatický"
+    },
+    "settings_device_font_renderer": {
+        "message": "Vykreslování systémových fontů"
     },
     "settings_advanced_options": {
         "message": "Pokročilá nastavení"

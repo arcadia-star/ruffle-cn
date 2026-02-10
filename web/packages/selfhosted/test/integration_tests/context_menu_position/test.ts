@@ -1,4 +1,9 @@
-import { injectRuffleAndWait, openTest, playAndMonitor } from "../../utils.js";
+import {
+    assertNoMoreTraceOutput,
+    injectRuffleAndWait,
+    openTest,
+    playAndMonitor,
+} from "../../utils.js";
 import { expect, use } from "chai";
 import chaiHtml from "chai-html";
 
@@ -15,12 +20,10 @@ async function setDirection(
     direction: string,
 ) {
     await browser.execute(
-        (element, direction) => {
-            const el = element as unknown as HTMLElement;
-            el.dir = direction;
+        ({ el, dir }: { el: HTMLElement; dir: string }) => {
+            el.dir = dir;
         },
-        element,
-        direction,
+        { el: element, dir: direction },
     );
 }
 
@@ -29,14 +32,14 @@ describe("Context Menu", () => {
         await openTest(browser, "integration_tests/context_menu_position");
         await injectRuffleAndWait(browser);
         const player = await browser.$("<ruffle-object>");
-        await playAndMonitor(browser, player, "Loaded!\n");
+        await playAndMonitor(browser, player, ["Loaded!"]);
 
         // Dismiss hardware acceleration modal in Chrome
         await player.click();
         await player.click();
 
         // Make the window large enough to accommodate a protruding context menu
-        await browser.setWindowSize(1000, 1000);
+        await browser.setWindowSize(1500, 1500);
     });
 
     it("open context menu in the middle LTR", async () => {
@@ -149,5 +152,10 @@ describe("Context Menu", () => {
 
         // Dismiss the menu
         await player.click({ x: -10, y: -10 });
+    });
+
+    it("no more traces", async function () {
+        const player = await browser.$("#objectElement");
+        assertNoMoreTraceOutput(browser, player);
     });
 });

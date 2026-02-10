@@ -1,10 +1,12 @@
 use crate::avm2::class::Class;
+use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::multiname::Multiname;
+use crate::avm2::namespace::Namespace;
 use crate::avm2::script::Script;
 use crate::string::AvmAtom;
 
 use gc_arena::{Collect, Gc};
-use swf::avm2::types::{Index, Method, Namespace};
+use std::cell::Cell;
 
 #[derive(Clone, Collect, Copy, Debug)]
 #[collect(no_drop)]
@@ -34,6 +36,12 @@ pub enum Op<'gc> {
         num_args: u32,
         push_return_value: bool,
     },
+    CallNative {
+        #[collect(require_static)]
+        method: NativeMethodImpl,
+        num_args: u32,
+        push_return_value: bool,
+    },
     CallProperty {
         multiname: Gc<'gc, Multiname<'gc>>,
 
@@ -50,8 +58,7 @@ pub enum Op<'gc> {
         num_args: u32,
     },
     CallStatic {
-        #[collect(require_static)]
-        index: Index<Method>,
+        method: Method<'gc>,
 
         num_args: u32,
     },
@@ -142,7 +149,21 @@ pub enum Op<'gc> {
     GetOuterScope {
         index: usize,
     },
-    GetProperty {
+
+    // The GetProperty op is specialized into three different ops depending on the multiname.
+    //  - If the multiname is fully static, the verifier emits GetPropertyStatic.
+    //  - If the multiname has a lazy name, a static namespace, contains the
+    //    the public namespace, and is not an attribute multiname, the verifier
+    //    emits GetPropertyFast.
+    //  - If neither condition is met (i.e. the multiname has a lazy namespace),
+    //    the verifier emits GetPropertySlow.
+    GetPropertyStatic {
+        multiname: Gc<'gc, Multiname<'gc>>,
+    },
+    GetPropertyFast {
+        multiname: Gc<'gc, Multiname<'gc>>,
+    },
+    GetPropertySlow {
         multiname: Gc<'gc, Multiname<'gc>>,
     },
     GetScopeObject {
@@ -221,8 +242,7 @@ pub enum Op<'gc> {
         class: Class<'gc>,
     },
     NewFunction {
-        #[collect(require_static)]
-        index: Index<Method>,
+        method: Method<'gc>,
     },
     NewObject {
         num_args: u32,
@@ -232,6 +252,9 @@ pub enum Op<'gc> {
     Nop,
     Not,
     Pop,
+    PopJump {
+        offset: usize,
+    },
     PopScope,
     PushDouble {
         value: f64,
@@ -241,8 +264,7 @@ pub enum Op<'gc> {
         value: i32,
     },
     PushNamespace {
-        #[collect(require_static)]
-        value: Index<Namespace>,
+        namespace: Namespace<'gc>,
     },
     PushNull,
     PushScope,
@@ -272,7 +294,15 @@ pub enum Op<'gc> {
     SetLocal {
         index: u32,
     },
-    SetProperty {
+
+    // See the comments on the GetProperty op
+    SetPropertyStatic {
+        multiname: Gc<'gc, Multiname<'gc>>,
+    },
+    SetPropertyFast {
+        multiname: Gc<'gc, Multiname<'gc>>,
+    },
+    SetPropertySlow {
         multiname: Gc<'gc, Multiname<'gc>>,
     },
     SetSlot {
@@ -292,6 +322,9 @@ pub enum Op<'gc> {
     Si32,
     Si8,
     StrictEquals,
+    StoreLocal {
+        index: u32,
+    },
     Subtract,
     SubtractI,
     Swap,
@@ -325,6 +358,7 @@ impl Op<'_> {
                 | Op::Nop
                 | Op::Not
                 | Op::Pop
+                | Op::PopJump { .. }
                 | Op::PopScope
                 | Op::PushDouble { .. }
                 | Op::PushFalse
@@ -338,19 +372,52 @@ impl Op<'_> {
                 | Op::PushUndefined
                 | Op::SetLocal { .. }
                 | Op::StrictEquals
+                | Op::StoreLocal { .. }
                 | Op::Swap
                 | Op::Timestamp
                 | Op::TypeOf
                 | Op::ReturnVoid { .. }
         )
     }
+
+    pub fn is_nop(&self) -> bool {
+        if cfg!(feature = "avm_debug") {
+            matches!(self, Op::Nop)
+        } else {
+            matches!(
+                self,
+                Op::Nop | Op::Debug { .. } | Op::DebugFile { .. } | Op::DebugLine { .. }
+            )
+        }
+    }
+
+    /// Whether all this op does is push a single value to the stack, possibly
+    /// reading from stack or locals, but never, e.g., throwing an error or
+    /// calling a method.
+    pub fn is_pure_push(&self) -> bool {
+        matches!(
+            self,
+            Op::PushTrue
+                | Op::PushFalse
+                | Op::PushUndefined
+                | Op::PushNull
+                | Op::PushDouble { .. }
+                | Op::PushInt { .. }
+                | Op::PushShort { .. }
+                | Op::PushUint { .. }
+                | Op::GetLocal { .. }
+                | Op::Dup
+        )
+    }
 }
 
+// This has interior mutability so that we can rewrite switch offsets from the
+// optimizer when we need to
 #[derive(Collect, Debug)]
 #[collect(require_static)]
 pub struct LookupSwitch {
-    pub default_offset: usize,
-    pub case_offsets: Box<[usize]>,
+    pub default_offset: Cell<usize>,
+    pub case_offsets: Box<[Cell<usize>]>,
 }
 
 #[cfg(target_pointer_width = "64")]

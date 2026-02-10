@@ -5,8 +5,8 @@ use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
 use fnv::FnvBuildHasher;
-use gc_arena::collect::Trace;
 use gc_arena::Collect;
+use gc_arena::collect::Trace;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::mem::swap;
@@ -157,7 +157,6 @@ impl<'gc, V> PropertyMap<'gc, V> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn remove(&mut self, name: QName<'gc>) -> Option<V> {
         let bucket = self.0.get_mut(&name.local_name());
 

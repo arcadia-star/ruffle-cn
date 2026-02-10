@@ -53,8 +53,20 @@ package flash.text.engine {
             return 12.0;
         }
 
+        [API("670")]
+        public function get totalAscent():Number {
+            stub_getter("flash.text.engine.TextLine", "totalAscent");
+            return 12.0;
+        }
+
         public function get descent():Number {
             stub_getter("flash.text.engine.TextLine", "descent");
+            return 3.0;
+        }
+
+        [API("670")]
+        public function get totalDescent():Number {
+            stub_getter("flash.text.engine.TextLine", "totalDescent");
             return 3.0;
         }
 
@@ -159,40 +171,20 @@ package flash.text.engine {
 
         // Overrides
 
-        override public function get contextMenu():ContextMenu {
-            return null;
-        }
-
         override public function set contextMenu(cm:ContextMenu):void {
             throw new IllegalOperationError("Error #2181: The TextLine class does not implement this property or method.", 2181);
-        }
-
-        override public function get focusRect():Object {
-            return null;
         }
 
         override public function set focusRect(value:Object):void {
             throw new IllegalOperationError("Error #2181: The TextLine class does not implement this property or method.", 2181);
         }
 
-        override public function get tabChildren():Boolean {
-            return false;
-        }
-
         override public function set tabChildren(value:Boolean):void {
             throw new IllegalOperationError("Error #2181: The TextLine class does not implement this property or method.", 2181);
         }
 
-        override public function get tabEnabled():Boolean {
-            return false;
-        }
-
         override public function set tabEnabled(value:Boolean):void {
             throw new IllegalOperationError("Error #2181: The TextLine class does not implement this property or method.", 2181);
-        }
-
-        override public function get tabIndex():int {
-            return -1;
         }
 
         override public function set tabIndex(index:int):void {

@@ -1,11 +1,12 @@
 //! Object representation for NetConnection
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::Error;
+use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::net_connection::NetConnectionHandle;
 use gc_arena::{Collect, Gc, GcWeak};
+use ruffle_common::utils::HasPrefixField;
 use std::cell::Cell;
 use std::fmt;
 use std::fmt::Debug;
@@ -35,7 +36,7 @@ pub struct NetConnectionObject<'gc>(pub Gc<'gc, NetConnectionObjectData<'gc>>);
 #[collect(no_drop)]
 pub struct NetConnectionObjectWeak<'gc>(pub GcWeak<'gc, NetConnectionObjectData<'gc>>);
 
-#[derive(Collect)]
+#[derive(Collect, HasPrefixField)]
 #[collect(no_drop)]
 #[repr(C, align(8))]
 pub struct NetConnectionObjectData<'gc> {
@@ -44,35 +45,18 @@ pub struct NetConnectionObjectData<'gc> {
     handle: Cell<Option<NetConnectionHandle>>,
 }
 
-const _: () = assert!(std::mem::offset_of!(NetConnectionObjectData, base) == 0);
-const _: () = assert!(
-    std::mem::align_of::<NetConnectionObjectData>() == std::mem::align_of::<ScriptObjectData>()
-);
-
 impl<'gc> TObject<'gc> for NetConnectionObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
-        // SAFETY: Object data is repr(C), and a compile-time assert ensures
-        // that the ScriptObjectData stays at offset 0 of the struct- so the
-        // layouts are compatible
-
-        unsafe { Gc::cast(self.0) }
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_net_connection(self) -> Option<NetConnectionObject<'gc>> {
-        Some(self)
+        HasPrefixField::as_prefix_gc(self.0)
     }
 }
 
 impl NetConnectionObject<'_> {
-    pub fn handle(&self) -> Option<NetConnectionHandle> {
+    pub fn handle(self) -> Option<NetConnectionHandle> {
         self.0.handle.get()
     }
 
-    pub fn set_handle(&self, handle: Option<NetConnectionHandle>) -> Option<NetConnectionHandle> {
+    pub fn set_handle(self, handle: Option<NetConnectionHandle>) -> Option<NetConnectionHandle> {
         self.0.handle.replace(handle)
     }
 }

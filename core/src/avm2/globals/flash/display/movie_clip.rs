@@ -1,13 +1,13 @@
 //! `flash.display.MovieClip` builtin/prototype
 
+use crate::avm2::Error;
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
-use crate::avm2::error::argument_error;
-use crate::avm2::object::{ArrayObject, TObject};
+use crate::avm2::error::make_error_2109;
+use crate::avm2::object::ArrayObject;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::display_object::{MovieClip, Scene, TDisplayObject};
+use crate::display_object::{MovieClip, Scene};
 use crate::string::{AvmString, WString};
 
 /// Implements `addFrameScript`, an undocumented method of `MovieClip` used to
@@ -25,6 +25,8 @@ pub fn add_frame_script<'gc>(
     {
         for (frame_id, callable) in args.chunks_exact(2).map(|s| (s[0], s[1])) {
             let frame_id = frame_id.coerce_to_u32(activation)? as u16 + 1;
+            // This is correct; FP will attempt to call any Object when running
+            // frame scripts
             let callable = callable.as_object();
 
             mc.register_frame_script(frame_id, callable, activation.context);
@@ -126,22 +128,23 @@ fn labels_for_scene<'gc>(
         length: scene_length,
     } = scene;
     let frame_label_class = activation.context.avm2.classes().framelabel;
-    let labels = mc.labels_in_range(*scene_start, scene_start + scene_length);
-    let mut frame_labels = Vec::with_capacity(labels.len());
 
-    for (name, frame) in labels {
-        let name: Value<'gc> = AvmString::new(activation.gc(), name).into();
-        let local_frame = frame - scene_start + 1;
-        let args = [name, local_frame.into()];
-        let frame_label = frame_label_class.construct(activation, &args)?;
+    let frame_labels = mc
+        .labels_in_range(*scene_start, scene_start + scene_length)
+        .into_iter()
+        .map(|(name, frame)| {
+            let name: Value<'gc> = AvmString::new(activation.gc(), name).into();
+            let local_frame = frame - scene_start + 1;
+            let args = [name, local_frame.into()];
 
-        frame_labels.push(Some(frame_label));
-    }
+            frame_label_class.construct(activation, &args)
+        })
+        .collect::<Result<ArrayStorage<'gc>, Error<'gc>>>()?;
 
     Ok((
         scene_name.to_string(),
         *scene_length,
-        ArrayObject::from_storage(activation, ArrayStorage::from_storage(frame_labels)),
+        ArrayObject::from_storage(activation.context, frame_labels),
     ))
 }
 
@@ -160,7 +163,7 @@ pub fn get_current_labels<'gc>(
         let scene = mc.current_scene().unwrap_or_else(|| Scene {
             name: WString::default(),
             start: 1,
-            length: mc.total_frames(),
+            length: mc.header_frames(),
         });
         return Ok(labels_for_scene(activation, mc, &scene)?.2.into());
     }
@@ -183,7 +186,7 @@ pub fn get_current_scene<'gc>(
         let scene = mc.current_scene().unwrap_or_else(|| Scene {
             name: WString::default(),
             start: 1,
-            length: mc.total_frames(),
+            length: mc.header_frames(),
         });
         let (scene_name, scene_length, scene_labels) = labels_for_scene(activation, mc, &scene)?;
         let scene_class = activation.context.avm2.classes().scene;
@@ -219,7 +222,7 @@ pub fn get_enabled<'gc>(
 }
 
 pub fn set_enabled<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -231,7 +234,7 @@ pub fn set_enabled<'gc>(
     {
         let enabled = args.get_bool(0);
 
-        mc.set_avm2_enabled(activation.context, enabled);
+        mc.set_avm2_enabled(enabled);
     }
 
     Ok(Value::Undefined)
@@ -254,31 +257,27 @@ pub fn get_scenes<'gc>(
             mc_scenes.push(Scene {
                 name: WString::default(),
                 start: 1,
-                length: mc.total_frames(),
+                length: mc.header_frames(),
             });
         }
 
-        let mut scene_objects = Vec::with_capacity(mc_scenes.len());
-        for scene in mc_scenes {
-            let (scene_name, scene_length, scene_labels) =
-                labels_for_scene(activation, mc, &scene)?;
-            let scene_class = activation.context.avm2.classes().scene;
-            let args = [
-                AvmString::new_utf8(activation.gc(), scene_name).into(),
-                scene_labels.into(),
-                scene_length.into(),
-            ];
+        let scene_objects = mc_scenes
+            .into_iter()
+            .map(|scene| {
+                let (scene_name, scene_length, scene_labels) =
+                    labels_for_scene(activation, mc, &scene)?;
+                let scene_class = activation.context.avm2.classes().scene;
+                let args = [
+                    AvmString::new_utf8(activation.gc(), scene_name).into(),
+                    scene_labels.into(),
+                    scene_length.into(),
+                ];
 
-            let scene = scene_class.construct(activation, &args)?;
+                scene_class.construct(activation, &args)
+            })
+            .collect::<Result<ArrayStorage<'gc>, Error<'gc>>>()?;
 
-            scene_objects.push(Some(scene));
-        }
-
-        return Ok(ArrayObject::from_storage(
-            activation,
-            ArrayStorage::from_storage(scene_objects),
-        )
-        .into());
+        return Ok(ArrayObject::from_storage(activation.context, scene_objects).into());
     }
 
     Ok(Value::Undefined)
@@ -296,7 +295,7 @@ pub fn get_frames_loaded<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        return Ok(mc.frames_loaded().into());
+        return Ok(mc.frames_loaded().min(mc.header_frames() as i32).into());
     }
 
     Ok(Value::Undefined)
@@ -332,7 +331,7 @@ pub fn get_total_frames<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        return Ok(mc.total_frames().into());
+        return Ok(mc.header_frames().into());
     }
 
     Ok(Value::Undefined)
@@ -350,8 +349,12 @@ pub fn goto_and_play<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.set_programmatically_played(activation.gc());
-        goto_frame(activation, mc, args, false)?;
+        mc.set_programmatically_played();
+
+        let frame_or_label = args.get_value(0);
+        let scene = args.try_get_string(1);
+
+        goto_frame(activation, mc, frame_or_label, scene, false)?;
     }
 
     Ok(Value::Undefined)
@@ -369,7 +372,10 @@ pub fn goto_and_stop<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        goto_frame(activation, mc, args, true)?;
+        let frame_or_label = args.get_value(0);
+        let scene = args.try_get_string(1);
+
+        goto_frame(activation, mc, frame_or_label, scene, true)?;
     }
 
     Ok(Value::Undefined)
@@ -378,12 +384,11 @@ pub fn goto_and_stop<'gc>(
 pub fn goto_frame<'gc>(
     activation: &mut Activation<'_, 'gc>,
     mc: MovieClip<'gc>,
-    args: &[Value<'gc>],
+    frame_or_label: Value<'gc>,
+    scene_str: Option<AvmString<'gc>>,
     stop: bool,
 ) -> Result<(), Error<'gc>> {
-    let frame_or_label = args.get(0).cloned().unwrap_or(Value::Null);
-
-    let scene = match args.try_get_string(activation, 1)? {
+    let scene = match scene_str {
         None => mc
             .current_scene()
             .and_then(|scene| mc.scene_label_to_number(&scene.name))
@@ -393,7 +398,8 @@ pub fn goto_frame<'gc>(
             .map(|v| v.saturating_sub(1)),
     }
     .unwrap_or(0) as i32;
-    let frame = match frame_or_label {
+
+    let frame = match frame_or_label.normalize() {
         Value::Integer(i) => i + scene,
         frame_or_label => {
             let frame_or_label = frame_or_label.coerce_to_string(activation)?;
@@ -404,30 +410,32 @@ pub fn goto_frame<'gc>(
                     .wrapping_add(scene)
                     .saturating_add(1)
             } else {
-                if !matches!(args[1], Value::Null) {
+                if let Some(scene_str) = scene_str {
                     //If the user specified a scene, we need to validate that
                     //the requested frame exists within that scene.
-                    let scene = args[1].coerce_to_string(activation)?;
-                    if !mc.frame_exists_within_scene(&frame_or_label, &scene, activation.context) {
-                        return Err(Error::AvmError(argument_error(
-                            activation,
-                            &format!("Error #2109: Frame label {frame_or_label} not found in scene {scene}."),
-                            2109,
-                        )?));
+                    if !mc.frame_exists_within_scene(
+                        &frame_or_label,
+                        &scene_str,
+                        activation.context,
+                    ) {
+                        return Err(make_error_2109(activation, frame_or_label, scene_str));
                     }
                 }
 
                 let frame = mc.frame_label_to_number(&frame_or_label, activation.context);
 
                 if activation.caller_movie_or_root().version() >= 11 {
-                    frame.ok_or(
-                        // TODO: Also include the scene in the error message, as done above
-                        Error::AvmError(argument_error(
+                    if let Some(frame) = frame {
+                        frame as i32
+                    } else {
+                        return Err(make_error_2109(
                             activation,
-                            &format!("Error #2109: {frame_or_label} is not a valid frame label."),
-                            2109,
-                        )?),
-                    )? as i32
+                            frame_or_label,
+                            // For some reason Flash uses the frame label as the
+                            // name of the scene
+                            frame_or_label,
+                        ));
+                    }
                 } else {
                     frame.unwrap_or(0) as i32 // Old swf versions silently jump to frame 1 for invalid labels.
                 }
@@ -460,7 +468,7 @@ pub fn stop<'gc>(
 
 /// Implements `play`.
 pub fn play<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -470,8 +478,8 @@ pub fn play<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.set_programmatically_played(activation.gc());
-        mc.play(activation.context);
+        mc.set_programmatically_played();
+        mc.play();
     }
 
     Ok(Value::Undefined)

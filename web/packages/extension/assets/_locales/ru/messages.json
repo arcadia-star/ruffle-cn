@@ -26,6 +26,12 @@
     "settings_log_level_info": {
         "message": "Информация"
     },
+    "settings_log_level_debug": {
+        "message": "Отлаживать"
+    },
+    "settings_log_level_trace": {
+        "message": "Отслеживать"
+    },
     "settings_max_execution_duration": {
         "message": "Максимальная допустимая длительность выполнения ActionScript (в секундах)"
     },
@@ -37,6 +43,12 @@
     },
     "settings_preferred_renderer_auto": {
         "message": "Автоматически"
+    },
+    "settings_device_font_renderer": {
+        "message": "Рендеринг шрифтов устройства"
+    },
+    "device_font_renderer_embedded": {
+        "message": "Встроенный"
     },
     "settings_advanced_options": {
         "message": "Расширенные настройки"

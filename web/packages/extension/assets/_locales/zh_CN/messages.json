@@ -26,6 +26,12 @@
     "settings_log_level_info": {
         "message": "信息"
     },
+    "settings_log_level_debug": {
+        "message": "调试"
+    },
+    "settings_log_level_trace": {
+        "message": "跟踪"
+    },
     "settings_max_execution_duration": {
         "message": "允许的 ActionScript 执行时间上限(秒)"
     },
@@ -37,6 +43,12 @@
     },
     "settings_preferred_renderer_auto": {
         "message": "自动"
+    },
+    "settings_device_font_renderer": {
+        "message": "设备字体渲染器"
+    },
+    "device_font_renderer_embedded": {
+        "message": "内置的"
     },
     "settings_advanced_options": {
         "message": "高级选项"

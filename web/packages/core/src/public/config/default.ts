@@ -9,6 +9,8 @@ import {
     PlayerRuntime,
     UnmuteOverlay,
     WindowMode,
+    ScrollingBehavior,
+    DeviceFontRenderer,
 } from "./load-options";
 
 export const DEFAULT_CONFIG: Required<BaseLoadOptions> = {
@@ -33,8 +35,9 @@ export const DEFAULT_CONFIG: Required<BaseLoadOptions> = {
     menu: true,
     allowFullscreen: false,
     salign: "",
+    fullScreenAspectRatio: "",
     forceAlign: false,
-    quality: "high",
+    quality: null,
     scale: "showAll",
     forceScale: false,
     frameRate: null,
@@ -53,4 +56,6 @@ export const DEFAULT_CONFIG: Required<BaseLoadOptions> = {
     playerRuntime: PlayerRuntime.FlashPlayer,
     gamepadButtonMapping: {},
     urlRewriteRules: [],
+    scrollingBehavior: ScrollingBehavior.Smart,
+    deviceFontRenderer: DeviceFontRenderer.Embedded,
 };

@@ -1,16 +1,16 @@
 //! `int` impl
 
-use crate::avm2::activation::Activation;
-use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::activation::Activation;
+use crate::avm2::parameters::ParametersExt;
+use crate::avm2::value::Value;
 
 pub fn int_constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let int_value = args
-        .get(0)
-        .copied()
+        .get_optional(0)
         .unwrap_or(Value::Integer(0))
         .coerce_to_i32(activation)?;
 
@@ -23,8 +23,7 @@ pub fn call_handler<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(args
-        .get(0)
-        .cloned()
+        .get_optional(0)
         .unwrap_or(Value::Integer(0))
         .coerce_to_i32(activation)?
         .into())

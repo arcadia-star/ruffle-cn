@@ -5,10 +5,10 @@ use crate::html::iterators::TextSpanIter;
 use crate::string::{Integer, SwfStrExt as _, Units, WStr, WString};
 use crate::tag_utils::SwfMovie;
 use gc_arena::Collect;
-use quick_xml::{escape::escape, events::Event, Reader};
+use quick_xml::{Reader, escape::escape, events::Event};
 use ruffle_wstr::utils::swf_is_newline;
 use std::borrow::Cow;
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::collections::VecDeque;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -154,6 +154,7 @@ impl TextFormat {
         context: &mut UpdateContext<'_>,
     ) -> Self {
         let encoding = swf_movie.encoding();
+        let swf_version = swf_movie.version();
         let movie_library = context.library.library_for_movie_mut(swf_movie);
         let font = et.font_id().and_then(|fid| movie_library.get_font(fid));
         let font_class = et
@@ -161,22 +162,40 @@ impl TextFormat {
             .map(|s| s.decode(encoding).into_owned())
             .or_else(|| font.map(|font| WString::from_utf8(font.descriptor().name())))
             .unwrap_or_else(|| WString::from_utf8("Times New Roman"));
-        let align = et.layout().map(|l| l.align);
-        let left_margin = et.layout().map(|l| l.left_margin.to_pixels());
-        let right_margin = et.layout().map(|l| l.right_margin.to_pixels());
-        let indent = et.layout().map(|l| l.indent.to_pixels().round_ties_even());
-        let leading = et.layout().map(|l| l.leading.to_pixels());
+        let align = if et.is_html() && (swf_version < 8 || et.initial_text().is_none()) {
+            // For some reason, when HTML is enabled in the SWF tag, align is
+            // always left, unless there's initial text and the SWF version is 8+.
+            // This does not apply to enabling HTML dynamically.
+            swf::TextAlign::Left
+        } else {
+            et.layout().map(|l| l.align).unwrap_or_default()
+        };
+        let left_margin = et
+            .layout()
+            .map(|l| l.left_margin.to_pixels())
+            .unwrap_or_default();
+        let right_margin = et
+            .layout()
+            .map(|l| l.right_margin.to_pixels())
+            .unwrap_or_default();
+        let indent = et
+            .layout()
+            .map(|l| l.indent.to_pixels().round_ties_even())
+            .unwrap_or_default();
+        let leading = et
+            .layout()
+            .map(|l| l.leading.to_pixels())
+            .unwrap_or_default();
 
-        // TODO: Text fields that don't specify a font are assumed to be 12px
-        // Times New Roman non-bold, non-italic. This will need to be revised
-        // when we start supporting device fonts.
         Self {
             font: Some(font_class),
-            size: et.height().map(|h| h.to_pixels()),
-            color: et
-                .color()
-                .map(|color| swf::Color::from_rgb(color.to_rgb(), 0)),
-            align,
+            size: Some(et.height().map(|h| h.to_pixels()).unwrap_or(12.0)),
+            color: Some(
+                et.color()
+                    .map(|color| swf::Color::from_rgb(color.to_rgb(), 0))
+                    .unwrap_or_else(|| swf::Color::TRANSPARENT),
+            ),
+            align: Some(align),
             bold: if et.is_html() {
                 Some(false)
             } else {
@@ -189,17 +208,15 @@ impl TextFormat {
             },
             underline: Some(false),
             display: Some(TextDisplay::Block),
-            left_margin,
-            right_margin,
-            indent,
-            block_indent: Some(0.0), // TODO: This isn't specified by the tag itself
+            left_margin: Some(left_margin),
+            right_margin: Some(right_margin),
+            indent: Some(indent),
+            block_indent: Some(0.0),
             kerning: Some(false),
-            leading,
-            letter_spacing: Some(0.0), // TODO: This isn't specified by the tag itself
-            tab_stops: Some(vec![]),   // TODO: Are there default tab stops?
-            bullet: Some(false),       // TODO: Default tab stops?
-
-            // TODO: These are probably empty strings by default
+            leading: Some(leading),
+            letter_spacing: Some(0.0),
+            tab_stops: Some(vec![]),
+            bullet: Some(false),
             url: Some(WString::new()),
             target: Some(WString::new()),
         }
@@ -457,6 +474,11 @@ impl TextSpan {
 
         data.set_text_format(tf);
 
+        // [KJ] Looks like you cannot get any value other than display:block
+        // when parsing HTML.  This property is being applied during parsing
+        // and not styling, so that kinda makes sense... I guess?
+        data.display = TextDisplay::Block;
+
         data
     }
 
@@ -597,7 +619,6 @@ impl FormatSpans {
     }
 
     /// Construct a format span from its raw parts.
-    #[allow(dead_code)]
     pub fn from_str_and_spans(text: &WStr, spans: &[TextSpan]) -> Self {
         Self {
             text: text.into(),
@@ -625,7 +646,7 @@ impl FormatSpans {
     /// presentational markup and CSS stylesheets.
     pub fn from_html(
         html: &WStr,
-        default_format: TextFormat,
+        mut default_format: TextFormat,
         style_sheet: Option<StyleSheet<'_>>,
         is_multiline: bool,
         condense_white: bool,
@@ -634,6 +655,12 @@ impl FormatSpans {
         // For SWF version 6, the multiline property exists and may be changed,
         // but its value is ignored and fields always behave as multiline.
         let is_multiline = is_multiline || swf_version <= 6;
+
+        if swf_version < 8 {
+            // For SWF<8, Flash Player always assumes left align for HTML, even
+            // if HTML is set dynamically.
+            default_format.align = Some(swf::TextAlign::Left);
+        }
 
         let mut format_stack = vec![default_format.clone()];
         let mut text = WString::new();
@@ -673,6 +700,9 @@ impl FormatSpans {
         let mut p_open = false;
         let mut last_closed_font: Option<TextSpanFont> = None;
 
+        // For applying display: block at the end of the tag
+        let mut display_block = false;
+
         let mut reader = Reader::from_reader(&raw_bytes[..]);
         let reader_config = reader.config_mut();
         reader_config.expand_empty_elements = true;
@@ -695,7 +725,7 @@ impl FormatSpans {
             };
 
             if let Some(style) = style_sheet.get_style(selector) {
-                style.clone().mix_with(format)
+                style.mix_with(format)
             } else {
                 format
             }
@@ -710,7 +740,10 @@ impl FormatSpans {
                         Ok(attributes) => attributes,
                         Err(e) => {
                             tracing::warn!("Error while parsing HTML: {}", e);
-                            return Default::default();
+                            return Self {
+                                default_format,
+                                ..Default::default()
+                            };
                         }
                     };
                     let attribute = move |name| {
@@ -824,22 +857,17 @@ impl FormatSpans {
                                 }
                             }
 
-                            if let Some(color) = attribute(b"color") {
-                                // FIXME - handle alpha
-                                if color.starts_with(b'#') {
-                                    let rval = color
-                                        .slice(1..3)
-                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
-                                    let gval = color
-                                        .slice(3..5)
-                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
-                                    let bval = color
-                                        .slice(5..7)
-                                        .and_then(|v| u8::from_wstr_radix(v, 16).ok());
-
-                                    if let (Some(r), Some(g), Some(b)) = (rval, gval, bval) {
-                                        format.color = Some(swf::Color { r, g, b, a: 0 });
-                                    }
+                            if let Some(color) = attribute(b"color")
+                                && let Some(hex) = color.strip_prefix(b'#')
+                            {
+                                let hex = hex.trim_start();
+                                let end = hex
+                                    .iter()
+                                    .take_while(|c| ruffle_wstr::utils::swf_is_ascii_hexdigit(*c))
+                                    .count();
+                                let start = end.saturating_sub(6);
+                                if let Ok(rgb) = u32::from_wstr_radix(&hex[start..end], 16) {
+                                    format.color = Some(swf::Color::from_rgb(rgb, 0));
                                 }
                             }
 
@@ -920,10 +948,18 @@ impl FormatSpans {
                             }
                         }
                         tag => {
-                            // TODO Add 'display' style support, Flash adds a newline on 'display: block'
+                            // Flash Player applies "display" only when the style is defined.
+                            // For unstyled tags, display: inline is assumed.
+                            format.display = None;
+
                             format = apply_style(style_sheet, format, WStr::from_units(tag));
+
+                            if let Some(TextDisplay::Block | TextDisplay::None) = format.display {
+                                display_block = true;
+                            }
                         }
                     }
+
                     opened_starts.push(opened_buffer.len());
                     opened_buffer.extend(tag_name);
                     format_stack.push(format);
@@ -932,6 +968,10 @@ impl FormatSpans {
                     let e = decode_to_wstr(&e.into_inner());
                     let e = process_html_entity(&e).unwrap_or(e);
                     let format = format_stack.last().unwrap().clone();
+                    if let Some(TextDisplay::None) = format.display {
+                        break 'text;
+                    }
+
                     if swf_version <= 7 && e.trim().is_empty() {
                         // SWFs version 6,7 ignore whitespace-only text.
                         // But whitespace is preserved when there
@@ -959,6 +999,13 @@ impl FormatSpans {
                             }
                         }
                         None => continue,
+                    }
+
+                    if display_block {
+                        display_block = false;
+                        let format = format_stack.last().unwrap().clone();
+                        text.push_str(WStr::from_units(b"\r"));
+                        spans.push(TextSpan::with_length_and_format(1, &format));
                     }
 
                     match tag_name {
@@ -1415,7 +1462,7 @@ impl FormatSpans {
     ///    character covered by the span, plus one)
     /// 3. The string contents of the text span
     /// 4. The formatting applied to the text span.
-    pub fn iter_spans(&self) -> TextSpanIter {
+    pub fn iter_spans(&self) -> TextSpanIter<'_> {
         TextSpanIter::for_format_spans(self)
     }
 
@@ -1459,8 +1506,8 @@ enum HtmlTag {
 }
 
 impl HtmlTag {
-    fn closeable(&self) -> bool {
-        self != &Self::Br && self != &Self::Sbr
+    fn closeable(self) -> bool {
+        self != Self::Br && self != Self::Sbr
     }
 }
 

@@ -1,9 +1,8 @@
 //! `flash.events.Event` builtin/prototype
 
-use crate::avm2::activation::Activation;
-use crate::avm2::object::TObject;
-use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::activation::Activation;
+use crate::avm2::value::Value;
 
 pub use crate::avm2::object::event_allocator;
 use crate::avm2::parameters::ParametersExt;
@@ -16,7 +15,7 @@ pub fn init<'gc>(
     let this = this.as_object().unwrap();
 
     let mut evt = this.as_event_mut(activation.gc()).unwrap();
-    evt.set_event_type(args.get_string(activation, 0)?);
+    evt.set_event_type(args.get_string(activation, 0));
     evt.set_bubbles(args.get_bool(1));
     evt.set_cancelable(args.get_bool(2));
     Ok(Value::Undefined)

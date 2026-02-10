@@ -2,13 +2,13 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::globals::bitmap_filter;
 use crate::avm1::object::NativeObject;
-use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{globals, ArrayBuilder, Object, ScriptObject, TObject, Value};
+use crate::avm1::property_decl::{DeclContext, StaticDeclarations, SystemClass};
+use crate::avm1::{ArrayBuilder, Object, Value, globals};
 use crate::display_object::{
     AutoSizeMode, EditText, TDisplayObject, TInteractiveObject, TextSelection,
 };
 use crate::html::TextFormat;
-use crate::string::{AvmString, StringContext, WStr};
+use crate::string::{AvmString, WStr};
 use gc_arena::Gc;
 use ruffle_macros::istr;
 use swf::Color;
@@ -53,61 +53,60 @@ macro_rules! tf_setter {
     };
 }
 
-const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "getNewTextFormat" => method(tf_method!(get_new_text_format); DONT_ENUM | DONT_DELETE);
-    "setNewTextFormat" => method(tf_method!(set_new_text_format); DONT_ENUM | DONT_DELETE);
-    "getTextFormat" => method(tf_method!(get_text_format); DONT_ENUM | DONT_DELETE);
-    "setTextFormat" => method(tf_method!(set_text_format); DONT_ENUM | DONT_DELETE);
-    "replaceSel" => method(tf_method!(replace_sel); DONT_ENUM | DONT_DELETE);
-    "replaceText" => method(tf_method!(replace_text); DONT_ENUM | DONT_DELETE);
-    "removeTextField" => method(tf_method!(remove_text_field); DONT_ENUM | DONT_DELETE);
-    "autoSize" => property(tf_getter!(auto_size), tf_setter!(set_auto_size));
-    "background" => property(tf_getter!(background), tf_setter!(set_background));
-    "backgroundColor" => property(tf_getter!(background_color), tf_setter!(set_background_color));
-    "border" => property(tf_getter!(border), tf_setter!(set_border));
-    "borderColor" => property(tf_getter!(border_color), tf_setter!(set_border_color));
-    "bottomScroll" => property(tf_getter!(bottom_scroll));
-    "embedFonts" => property(tf_getter!(embed_fonts), tf_setter!(set_embed_fonts));
-    "filters" => property(tf_getter!(filters), tf_setter!(set_filters); DONT_DELETE | DONT_ENUM | VERSION_8);
+const PROTO_DECLS: StaticDeclarations = declare_static_properties! {
+    "replaceSel" => method(tf_method!(replace_sel); DONT_ENUM | DONT_DELETE | VERSION_6);
+    "getTextFormat" => method(tf_method!(get_text_format); DONT_ENUM | DONT_DELETE | VERSION_6);
+    "setTextFormat" => method(tf_method!(set_text_format); DONT_ENUM | DONT_DELETE | VERSION_6);
+    "removeTextField" => method(tf_method!(remove_text_field); DONT_ENUM | DONT_DELETE | VERSION_6);
+    "getNewTextFormat" => method(tf_method!(get_new_text_format); DONT_ENUM | DONT_DELETE | VERSION_6);
+    "setNewTextFormat" => method(tf_method!(set_new_text_format); DONT_ENUM | DONT_DELETE | VERSION_6);
     "getDepth" => method(globals::get_depth; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
-    "hscroll" => property(tf_getter!(hscroll), tf_setter!(set_hscroll));
-    "html" => property(tf_getter!(html), tf_setter!(set_html));
-    "htmlText" => property(tf_getter!(html_text), tf_setter!(set_html_text));
-    "condenseWhite" => property(tf_getter!(condense_white), tf_setter!(set_condense_white));
-    "length" => property(tf_getter!(length));
-    "maxhscroll" => property(tf_getter!(maxhscroll));
-    "maxscroll" => property(tf_getter!(maxscroll));
-    "maxChars" => property(tf_getter!(max_chars), tf_setter!(set_max_chars));
-    "mouseWheelEnabled" => property(tf_getter!(mouse_wheel_enabled), tf_setter!(set_mouse_wheel_enabled));
-    "multiline" => property(tf_getter!(multiline), tf_setter!(set_multiline));
-    "password" => property(tf_getter!(password), tf_setter!(set_password));
-    "restrict" => property(tf_getter!(restrict), tf_setter!(set_restrict));
+    "replaceText" => method(tf_method!(replace_text); DONT_ENUM | DONT_DELETE | VERSION_7);
+    "gridFitType" => property(tf_getter!(grid_fit_type), tf_setter!(set_grid_fit_type); VERSION_8);
+    "antiAliasType" => property(tf_getter!(anti_alias_type), tf_setter!(set_anti_alias_type); VERSION_8);
+    "thickness" => property(tf_getter!(thickness), tf_setter!(set_thickness); VERSION_8);
+    "sharpness" => property(tf_getter!(sharpness), tf_setter!(set_sharpness); VERSION_8);
+    "filters" => property(tf_getter!(filters), tf_setter!(set_filters); DONT_DELETE | VERSION_8);
     "scroll" => property(tf_getter!(scroll), tf_setter!(set_scroll));
-    "selectable" => property(tf_getter!(selectable), tf_setter!(set_selectable));
-    "text" => property(tf_getter!(text), tf_setter!(set_text));
+    "maxscroll" => property(tf_getter!(maxscroll));
+    "borderColor" => property(tf_getter!(border_color), tf_setter!(set_border_color));
+    "backgroundColor" => property(tf_getter!(background_color), tf_setter!(set_background_color));
     "textColor" => property(tf_getter!(text_color), tf_setter!(set_text_color));
-    "textHeight" => property(tf_getter!(text_height));
-    "textWidth" => property(tf_getter!(text_width));
-    "type" => property(tf_getter!(get_type), tf_setter!(set_type));
-    "variable" => property(tf_getter!(variable), tf_setter!(set_variable));
-    "wordWrap" => property(tf_getter!(word_wrap), tf_setter!(set_word_wrap));
-    "antiAliasType" => property(tf_getter!(anti_alias_type), tf_setter!(set_anti_alias_type));
-    "gridFitType" => property(tf_getter!(grid_fit_type), tf_setter!(set_grid_fit_type));
-    "sharpness" => property(tf_getter!(sharpness), tf_setter!(set_sharpness));
-    "thickness" => property(tf_getter!(thickness), tf_setter!(set_thickness));
     // NOTE: `tabEnabled` is not a built-in property of TextField.
-    "tabIndex" => property(tf_getter!(tab_index), tf_setter!(set_tab_index); VERSION_6);
-    "styleSheet" => property(tf_getter!(style_sheet), tf_setter!(set_style_sheet); VERSION_7);
+    "tabIndex" => property(tf_getter!(tab_index), tf_setter!(set_tab_index));
+    "autoSize" => property(tf_getter!(auto_size), tf_setter!(set_auto_size));
+    "text" => property(tf_getter!(text), tf_setter!(set_text));
+    "type" => property(tf_getter!(get_type), tf_setter!(set_type));
+    "htmlText" => property(tf_getter!(html_text), tf_setter!(set_html_text));
+    "variable" => property(tf_getter!(variable), tf_setter!(set_variable));
+    "hscroll" => property(tf_getter!(hscroll), tf_setter!(set_hscroll));
+    "maxhscroll" => property(tf_getter!(maxhscroll));
+    "maxChars" => property(tf_getter!(max_chars), tf_setter!(set_max_chars));
+    "embedFonts" => property(tf_getter!(embed_fonts), tf_setter!(set_embed_fonts));
+    "html" => property(tf_getter!(html), tf_setter!(set_html));
+    "border" => property(tf_getter!(border), tf_setter!(set_border));
+    "background" => property(tf_getter!(background), tf_setter!(set_background));
+    "wordWrap" => property(tf_getter!(word_wrap), tf_setter!(set_word_wrap));
+    "password" => property(tf_getter!(password), tf_setter!(set_password));
+    "multiline" => property(tf_getter!(multiline), tf_setter!(set_multiline));
+    "selectable" => property(tf_getter!(selectable), tf_setter!(set_selectable));
+    "length" => property(tf_getter!(length));
+    "bottomScroll" => property(tf_getter!(bottom_scroll));
+    "textWidth" => property(tf_getter!(text_width));
+    "textHeight" => property(tf_getter!(text_height));
+    "restrict" => property(tf_getter!(restrict), tf_setter!(set_restrict));
+    "condenseWhite" => property(tf_getter!(condense_white), tf_setter!(set_condense_white));
+    "mouseWheelEnabled" => property(tf_getter!(mouse_wheel_enabled), tf_setter!(set_mouse_wheel_enabled));
+    "styleSheet" => property(tf_getter!(style_sheet), tf_setter!(set_style_sheet));
 };
 
-pub fn create_proto<'gc>(
-    context: &mut StringContext<'gc>,
-    proto: Object<'gc>,
-    fn_proto: Object<'gc>,
-) -> Object<'gc> {
-    let object = ScriptObject::new(context, Some(proto));
-    define_properties_on(PROTO_DECLS, context, object, fn_proto);
-    object.into()
+pub fn create_class<'gc>(
+    context: &mut DeclContext<'_, 'gc>,
+    super_proto: Object<'gc>,
+) -> SystemClass<'gc> {
+    let class = context.empty_class(super_proto);
+    context.define_properties_on(class.proto, PROTO_DECLS(context));
+    class
 }
 
 pub fn password<'gc>(
@@ -129,9 +128,9 @@ pub fn set_password<'gc>(
 fn new_text_format<'gc>(
     activation: &mut Activation<'_, 'gc>,
     text_format: TextFormat,
-) -> ScriptObject<'gc> {
-    let proto = activation.context.avm1.prototypes().text_format;
-    let object = ScriptObject::new(&activation.context.strings, Some(proto));
+) -> Object<'gc> {
+    let proto = activation.prototypes().text_format;
+    let object = Object::new(&activation.context.strings, Some(proto));
     object.set_native(
         activation.gc(),
         NativeObject::TextFormat(Gc::new(activation.gc(), text_format.into())),
@@ -150,13 +149,13 @@ fn get_new_text_format<'gc>(
 
 fn set_new_text_format<'gc>(
     text_field: EditText<'gc>,
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let [Value::Object(text_format), ..] = args {
-        if let NativeObject::TextFormat(text_format) = text_format.native() {
-            text_field.set_new_text_format(text_format.borrow().clone(), activation.context);
-        }
+    if let [Value::Object(text_format), ..] = args
+        && let NativeObject::TextFormat(text_format) = text_format.native()
+    {
+        text_field.set_new_text_format(text_format.borrow().clone());
     }
 
     Ok(Value::Undefined)
@@ -213,15 +212,15 @@ fn set_text_format<'gc>(
         _ => return Ok(Value::Undefined),
     };
 
-    if let Value::Object(text_format) = text_format {
-        if let NativeObject::TextFormat(text_format) = text_format.native() {
-            text_field.set_text_format(
-                begin_index,
-                end_index,
-                text_format.borrow().clone(),
-                activation.context,
-            );
-        }
+    if let Value::Object(text_format) = text_format
+        && let NativeObject::TextFormat(text_format) = text_format.native()
+    {
+        text_field.set_text_format(
+            begin_index,
+            end_index,
+            text_format.borrow().clone(),
+            activation.context,
+        );
     }
 
     Ok(Value::Undefined)
@@ -249,10 +248,9 @@ fn replace_sel<'gc>(
         &text,
         activation.context,
     );
-    text_field.set_selection(
-        Some(TextSelection::for_position(selection.start() + text.len())),
-        activation.gc(),
-    );
+    text_field.set_selection(Some(TextSelection::for_position(
+        selection.start() + text.len(),
+    )));
 
     text_field.propagate_text_binding(activation);
 
@@ -325,7 +323,7 @@ pub fn set_html<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let value = value.as_bool(activation.swf_version());
-    this.set_is_html(activation.context, value);
+    this.set_is_html(value);
     Ok(())
 }
 
@@ -355,7 +353,7 @@ pub fn set_text_color<'gc>(
         text_format.clone(),
         activation.context,
     );
-    this.set_new_text_format(text_format, activation.context);
+    this.set_new_text_format(text_format);
     Ok(())
 }
 
@@ -390,7 +388,7 @@ pub fn set_background<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let has_background = value.as_bool(activation.swf_version());
-    this.set_has_background(activation.gc(), has_background);
+    this.set_has_background(has_background);
     Ok(())
 }
 
@@ -408,7 +406,7 @@ pub fn set_background_color<'gc>(
 ) -> Result<(), Error<'gc>> {
     let rgb = value.coerce_to_u32(activation)?;
     let color = Color::from_rgb(rgb, 255);
-    this.set_background_color(activation.gc(), color);
+    this.set_background_color(color);
     Ok(())
 }
 
@@ -425,7 +423,7 @@ pub fn set_border<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let has_border = value.as_bool(activation.swf_version());
-    this.set_has_border(activation.gc(), has_border);
+    this.set_has_border(has_border);
     Ok(())
 }
 
@@ -443,7 +441,7 @@ pub fn set_border_color<'gc>(
 ) -> Result<(), Error<'gc>> {
     let rgb = value.coerce_to_u32(activation)?;
     let color = Color::from_rgb(rgb, 255);
-    this.set_border_color(activation.gc(), color);
+    this.set_border_color(color);
     Ok(())
 }
 
@@ -500,7 +498,7 @@ pub fn set_mouse_wheel_enabled<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let is_enabled = value.as_bool(activation.swf_version());
-    this.set_mouse_wheel_enabled(is_enabled, activation.context);
+    this.set_mouse_wheel_enabled(is_enabled);
     Ok(())
 }
 
@@ -534,7 +532,7 @@ pub fn set_selectable<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let set_selectable = value.as_bool(activation.swf_version());
-    this.set_selectable(set_selectable, activation.context);
+    this.set_selectable(set_selectable);
     Ok(())
 }
 
@@ -595,12 +593,23 @@ pub fn set_auto_size<'gc>(
     activation: &mut Activation<'_, 'gc>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    let mode = match value {
-        Value::String(s) if s.eq_ignore_case(WStr::from_units(b"left")) => AutoSizeMode::Left,
-        Value::String(s) if s.eq_ignore_case(WStr::from_units(b"center")) => AutoSizeMode::Center,
-        Value::String(s) if s.eq_ignore_case(WStr::from_units(b"right")) => AutoSizeMode::Right,
-        Value::Bool(true) => AutoSizeMode::Left,
-        _ => AutoSizeMode::None,
+    let mode = if let Value::Bool(value) = value {
+        if value {
+            AutoSizeMode::Left
+        } else {
+            AutoSizeMode::None
+        }
+    } else {
+        let mode = value.coerce_to_string(activation)?;
+        if mode.eq_ignore_case(WStr::from_units(b"left")) {
+            AutoSizeMode::Left
+        } else if mode.eq_ignore_case(WStr::from_units(b"center")) {
+            AutoSizeMode::Center
+        } else if mode.eq_ignore_case(WStr::from_units(b"right")) {
+            AutoSizeMode::Right
+        } else {
+            AutoSizeMode::None
+        }
     };
     this.set_autosize(mode, activation.context);
 
@@ -626,9 +635,9 @@ pub fn set_type<'gc>(
     let value = value.coerce_to_string(activation)?;
 
     if value.eq_ignore_case(WStr::from_units(b"input")) {
-        this.set_editable(true, activation.context);
+        this.set_editable(true);
     } else if value.eq_ignore_case(WStr::from_units(b"dynamic")) {
-        this.set_editable(false, activation.context)
+        this.set_editable(false)
     } else {
         tracing::warn!("Invalid TextField.type: {}", value);
     }
@@ -651,7 +660,7 @@ pub fn set_hscroll<'gc>(
     // SWF v8 and earlier has the simple clamping behaviour below. SWF v9+ is much more complicated. See #4634.
     let hscroll_pixels = value.coerce_to_i32(activation)? as f64;
     let clamped = hscroll_pixels.clamp(0.0, this.maxhscroll());
-    this.set_hscroll(clamped, activation.context);
+    this.set_hscroll(clamped);
     Ok(())
 }
 
@@ -675,7 +684,7 @@ pub fn set_scroll<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let input = value.coerce_to_f64(activation)?;
-    this.set_scroll(input, activation.context);
+    this.set_scroll(input);
     Ok(())
 }
 
@@ -692,7 +701,7 @@ pub fn set_max_chars<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let input = value.coerce_to_i32(activation)?;
-    this.set_max_chars(input, activation.context);
+    this.set_max_chars(input);
     Ok(())
 }
 
@@ -735,9 +744,9 @@ pub fn set_anti_alias_type<'gc>(
     let new_type = value.coerce_to_string(activation)?;
 
     if &new_type == b"advanced" {
-        this.set_render_settings(activation.gc(), old_settings.with_advanced_rendering());
+        this.set_render_settings(old_settings.with_advanced_rendering());
     } else if &new_type == b"normal" {
-        this.set_render_settings(activation.gc(), old_settings.with_normal_rendering());
+        this.set_render_settings(old_settings.with_normal_rendering());
     }
 
     Ok(())
@@ -765,20 +774,11 @@ pub fn set_grid_fit_type<'gc>(
     let new_type = value.coerce_to_string(activation)?;
 
     if &new_type == b"pixel" {
-        this.set_render_settings(
-            activation.gc(),
-            old_settings.with_grid_fit(swf::TextGridFit::Pixel),
-        );
+        this.set_render_settings(old_settings.with_grid_fit(swf::TextGridFit::Pixel));
     } else if &new_type == b"subpixel" {
-        this.set_render_settings(
-            activation.gc(),
-            old_settings.with_grid_fit(swf::TextGridFit::SubPixel),
-        );
+        this.set_render_settings(old_settings.with_grid_fit(swf::TextGridFit::SubPixel));
     } else if &new_type == b"none" {
-        this.set_render_settings(
-            activation.gc(),
-            old_settings.with_grid_fit(swf::TextGridFit::None),
-        );
+        this.set_render_settings(old_settings.with_grid_fit(swf::TextGridFit::None));
     } // NOTE: In AS2 invalid values do nothing.
 
     Ok(())
@@ -799,10 +799,7 @@ pub fn set_thickness<'gc>(
     let old_settings = this.render_settings();
     let new_thickness = value.coerce_to_f64(activation)?;
 
-    this.set_render_settings(
-        activation.gc(),
-        old_settings.with_thickness(new_thickness as f32),
-    );
+    this.set_render_settings(old_settings.with_thickness(new_thickness as f32));
 
     Ok(())
 }
@@ -822,10 +819,7 @@ pub fn set_sharpness<'gc>(
     let old_settings = this.render_settings();
     let new_sharpness = value.coerce_to_f64(activation)?;
 
-    this.set_render_settings(
-        activation.gc(),
-        old_settings.with_sharpness(new_sharpness as f32),
-    );
+    this.set_render_settings(old_settings.with_sharpness(new_sharpness as f32));
 
     Ok(())
 }
@@ -837,8 +831,8 @@ fn filters<'gc>(
     Ok(ArrayBuilder::new(activation)
         .with(
             this.filters()
-                .into_iter()
-                .map(|filter| bitmap_filter::filter_to_avm1(activation, filter)),
+                .iter()
+                .map(|filter| bitmap_filter::filter_to_avm1(activation, filter.clone())),
         )
         .into())
 }
@@ -851,13 +845,15 @@ fn set_filters<'gc>(
     let mut filters = vec![];
     if let Value::Object(value) = value {
         for index in value.get_keys(activation, false).into_iter().rev() {
-            let filter_object = value.get(index, activation)?.coerce_to_object(activation);
+            let filter_object = value
+                .get(index, activation)?
+                .coerce_to_object_or_bare(activation)?;
             if let Some(filter) = bitmap_filter::avm1_to_filter(filter_object, activation.context) {
                 filters.push(filter);
             }
         }
     }
-    this.set_filters(activation.gc(), filters);
+    this.set_filters(filters.into_boxed_slice());
     Ok(())
 }
 
@@ -878,16 +874,16 @@ fn set_restrict<'gc>(
 ) -> Result<(), Error<'gc>> {
     match value {
         Value::Undefined | Value::Null => {
-            this.set_restrict(None, activation.context);
+            this.set_restrict(None);
         }
         _ => {
             let text = value.coerce_to_string(activation)?;
             if text.is_empty() {
                 // According to docs, an empty string means that you cannot enter any character,
                 // but according to reality, an empty string is equivalent to null in AVM1.
-                this.set_restrict(None, activation.context);
+                this.set_restrict(None);
             } else {
-                this.set_restrict(Some(&text), activation.context);
+                this.set_restrict(Some(&text));
             }
         }
     };
@@ -898,7 +894,7 @@ pub fn tab_index<'gc>(
     this: EditText<'gc>,
     _activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(index) = this.as_interactive().and_then(|this| this.tab_index()) {
+    if let Some(index) = this.tab_index() {
         Ok(Value::Number(index as u32 as f64))
     } else {
         Ok(Value::Undefined)
@@ -910,19 +906,17 @@ pub fn set_tab_index<'gc>(
     activation: &mut Activation<'_, 'gc>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    if let Some(this) = this.as_interactive() {
-        let value = match value {
-            Value::Undefined | Value::Null => None,
-            _ => {
-                // `tabIndex` is u32 in TextField, compared to i32 in Button and MovieClip,
-                // but that is only a data representation difference,
-                // as both are interpreted as i32.
-                let u32_value = value.coerce_to_u32(activation)?;
-                Some(u32_value as i32)
-            }
-        };
-        this.set_tab_index(activation.context, value);
-    }
+    let value = match value {
+        Value::Undefined | Value::Null => None,
+        _ => {
+            // `tabIndex` is u32 in TextField, compared to i32 in Button and MovieClip,
+            // but that is only a data representation difference,
+            // as both are interpreted as i32.
+            let u32_value = value.coerce_to_u32(activation)?;
+            Some(u32_value as i32)
+        }
+    };
+    this.set_tab_index(value);
     Ok(())
 }
 
@@ -939,7 +933,7 @@ pub fn set_condense_white<'gc>(
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let condense_white = value.as_bool(activation.swf_version());
-    this.set_condense_white(activation.context, condense_white);
+    this.set_condense_white(condense_white);
     Ok(())
 }
 

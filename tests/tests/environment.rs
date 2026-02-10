@@ -27,13 +27,16 @@ impl Environment for NativeEnvironment {
 #[cfg(feature = "imgtests")]
 mod renderer {
     use image::RgbaImage;
-    use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend};
+    use ruffle_render_wgpu::backend::{
+        WgpuRenderBackend, create_wgpu_instance, request_adapter_and_device,
+    };
     use ruffle_render_wgpu::descriptors::Descriptors;
     use ruffle_render_wgpu::target::TextureTarget;
     use ruffle_render_wgpu::wgpu;
     use ruffle_test_framework::environment::{RenderBackend, RenderInterface};
     use ruffle_test_framework::options::RenderOptions;
-    use {std::sync::Arc, std::sync::OnceLock};
+    use std::any::Any;
+    use std::sync::{Arc, OnceLock};
 
     pub struct NativeRenderInterface;
 
@@ -67,10 +70,9 @@ mod renderer {
             }
         }
 
-        fn capture(&self, backend: &mut Box<dyn RenderBackend>) -> RgbaImage {
-            let renderer = backend
-                .downcast_mut::<WgpuRenderBackend<TextureTarget>>()
-                .unwrap();
+        fn capture(&self, backend: &mut dyn RenderBackend) -> RgbaImage {
+            let renderer =
+                <dyn Any>::downcast_mut::<WgpuRenderBackend<TextureTarget>>(backend).unwrap();
 
             renderer.capture_frame().expect("Failed to capture image")
         }
@@ -95,13 +97,12 @@ mod renderer {
     */
 
     fn create_wgpu_device() -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(&Default::default());
+        let instance = create_wgpu_instance(wgpu::Backends::all(), wgpu::BackendOptions::default());
         futures::executor::block_on(request_adapter_and_device(
             wgpu::Backends::all(),
             &instance,
             None,
             Default::default(),
-            None,
         ))
         .ok()
         .map(|(adapter, device, queue)| (instance, adapter, device, queue))

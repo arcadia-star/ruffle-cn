@@ -1,9 +1,10 @@
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ClassObject, Object, TObject};
 use crate::avm2::{Activation, Error};
 use crate::backend::ui::FileDialogResult;
-use gc_arena::GcWeak;
-use gc_arena::{Collect, Gc};
+use crate::context::UpdateContext;
+use gc_arena::{Collect, DynamicRoot, Gc, GcWeak, Rootable};
+use ruffle_common::utils::HasPrefixField;
 use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
 
@@ -32,26 +33,27 @@ pub struct FileReferenceObject<'gc>(pub Gc<'gc, FileReferenceObjectData<'gc>>);
 #[collect(no_drop)]
 pub struct FileReferenceObjectWeak<'gc>(pub GcWeak<'gc, FileReferenceObjectData<'gc>>);
 
+#[derive(Clone)]
+pub struct FileReferenceObjectHandle(DynamicRoot<Rootable![FileReferenceObjectData<'_>]>);
+
+impl FileReferenceObjectHandle {
+    pub fn stash<'gc>(context: &UpdateContext<'gc>, this: FileReferenceObject<'gc>) -> Self {
+        Self(context.dynamic_root.stash(context.gc(), this.0))
+    }
+
+    pub fn fetch<'gc>(&self, context: &UpdateContext<'gc>) -> FileReferenceObject<'gc> {
+        FileReferenceObject(context.dynamic_root.fetch(&self.0))
+    }
+}
+
 impl<'gc> TObject<'gc> for FileReferenceObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
-        // SAFETY: Object data is repr(C), and a compile-time assert ensures
-        // that the ScriptObjectData stays at offset 0 of the struct- so the
-        // layouts are compatible
-
-        unsafe { Gc::cast(self.0) }
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_file_reference(&self) -> Option<FileReferenceObject<'gc>> {
-        Some(*self)
+        HasPrefixField::as_prefix_gc(self.0)
     }
 }
 
 impl FileReferenceObject<'_> {
-    pub fn init_from_dialog_result(&self, result: Box<dyn FileDialogResult>) -> FileReference {
+    pub fn init_from_dialog_result(self, result: Box<dyn FileDialogResult>) -> FileReference {
         self.0
             .reference
             .replace(FileReference::FileDialogResult(result))
@@ -61,11 +63,11 @@ impl FileReferenceObject<'_> {
         self.0.reference.borrow()
     }
 
-    pub fn set_loaded(&self, value: bool) {
+    pub fn set_loaded(self, value: bool) {
         self.0.loaded.set(value)
     }
 
-    pub fn loaded(&self) -> bool {
+    pub fn loaded(self) -> bool {
         self.0.loaded.get()
     }
 }
@@ -75,7 +77,7 @@ pub enum FileReference {
     FileDialogResult(Box<dyn FileDialogResult>),
 }
 
-#[derive(Collect)]
+#[derive(Collect, HasPrefixField)]
 #[collect(no_drop)]
 #[repr(C, align(8))]
 pub struct FileReferenceObjectData<'gc> {
@@ -86,11 +88,6 @@ pub struct FileReferenceObjectData<'gc> {
 
     loaded: Cell<bool>,
 }
-
-const _: () = assert!(std::mem::offset_of!(FileReferenceObjectData, base) == 0);
-const _: () = assert!(
-    std::mem::align_of::<FileReferenceObjectData>() == std::mem::align_of::<ScriptObjectData>()
-);
 
 impl fmt::Debug for FileReferenceObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

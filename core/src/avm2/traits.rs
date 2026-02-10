@@ -1,14 +1,15 @@
 //! Active trait definitions
 
-use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
-use crate::avm2::metadata::Metadata;
-use crate::avm2::method::Method;
-use crate::avm2::script::TranslationUnit;
-use crate::avm2::value::{abc_default_value, Value};
 use crate::avm2::Error;
 use crate::avm2::Multiname;
 use crate::avm2::QName;
+use crate::avm2::activation::Activation;
+use crate::avm2::class::Class;
+use crate::avm2::domain::Domain;
+use crate::avm2::metadata::Metadata;
+use crate::avm2::method::Method;
+use crate::avm2::script::TranslationUnit;
+use crate::avm2::value::{Value, abc_default_value};
 use bitflags::bitflags;
 use gc_arena::{Collect, Gc};
 use swf::avm2::types::{
@@ -76,7 +77,7 @@ pub enum TraitKind<'gc> {
         slot_id: u32,
         type_name: Option<Gc<'gc, Multiname<'gc>>>,
         default_value: Value<'gc>,
-        unit: Option<TranslationUnit<'gc>>,
+        domain: Domain<'gc>,
     },
 
     /// A method on an object that can be called.
@@ -98,69 +99,16 @@ pub enum TraitKind<'gc> {
         slot_id: u32,
         type_name: Option<Gc<'gc, Multiname<'gc>>>,
         default_value: Value<'gc>,
-        unit: Option<TranslationUnit<'gc>>,
+        domain: Domain<'gc>,
     },
 }
 
 impl<'gc> Trait<'gc> {
-    pub fn from_class(name: QName<'gc>, class: Class<'gc>) -> Self {
-        Trait {
-            name,
-            attributes: TraitAttributes::empty(),
-            kind: TraitKind::Class { slot_id: 0, class },
-            metadata: None,
-        }
-    }
-
-    pub fn from_method(name: QName<'gc>, method: Method<'gc>) -> Self {
-        Trait {
-            name,
-            attributes: TraitAttributes::empty(),
-            kind: TraitKind::Method { disp_id: 0, method },
-            metadata: None,
-        }
-    }
-
-    pub fn from_getter(name: QName<'gc>, method: Method<'gc>) -> Self {
-        Trait {
-            name,
-            attributes: TraitAttributes::empty(),
-            kind: TraitKind::Getter { disp_id: 0, method },
-            metadata: None,
-        }
-    }
-
-    pub fn from_setter(name: QName<'gc>, method: Method<'gc>) -> Self {
-        Trait {
-            name,
-            attributes: TraitAttributes::empty(),
-            kind: TraitKind::Setter { disp_id: 0, method },
-            metadata: None,
-        }
-    }
-
-    pub fn from_slot(
-        name: QName<'gc>,
-        type_name: Option<Gc<'gc, Multiname<'gc>>>,
-        default_value: Option<Value<'gc>>,
-    ) -> Self {
-        Trait {
-            name,
-            attributes: TraitAttributes::empty(),
-            kind: TraitKind::Slot {
-                slot_id: 0,
-                default_value: default_value.unwrap_or_else(|| default_value_for_type(type_name)),
-                type_name,
-                unit: None,
-            },
-            metadata: None,
-        }
-    }
-
     pub fn from_const(
         name: QName<'gc>,
         type_name: Option<Gc<'gc, Multiname<'gc>>>,
         default_value: Option<Value<'gc>>,
+        domain: Domain<'gc>,
     ) -> Self {
         Trait {
             name,
@@ -169,7 +117,7 @@ impl<'gc> Trait<'gc> {
                 slot_id: 0,
                 default_value: default_value.unwrap_or_else(|| default_value_for_type(type_name)),
                 type_name,
-                unit: None,
+                domain,
             },
             metadata: None,
         }
@@ -183,22 +131,22 @@ impl<'gc> Trait<'gc> {
     ) -> Result<Self, Error<'gc>> {
         let name = QName::from_abc_multiname(activation, unit, abc_trait.name)?;
 
-        Ok(match &abc_trait.kind {
+        Ok(match abc_trait.kind {
             AbcTraitKind::Slot {
                 slot_id,
                 type_name,
                 value,
             } => {
-                let type_name = unit.pool_multiname_static_any(activation, *type_name)?;
+                let type_name = unit.pool_multiname_static_any(activation, type_name)?;
                 let default_value = slot_default_value(unit, value, type_name, activation)?;
                 Trait {
                     name,
                     attributes: trait_attribs_from_abc_traits(abc_trait),
                     kind: TraitKind::Slot {
-                        slot_id: *slot_id,
+                        slot_id,
                         type_name,
                         default_value,
-                        unit: Some(unit),
+                        domain: unit.domain(),
                     },
                     metadata: Metadata::from_abc_index(activation, unit, &abc_trait.metadata)?,
                 }
@@ -207,8 +155,8 @@ impl<'gc> Trait<'gc> {
                 name,
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Method {
-                    disp_id: *disp_id,
-                    method: unit.load_method(*method, false, activation)?,
+                    disp_id,
+                    method: unit.load_method(method, false, activation)?,
                 },
                 metadata: Metadata::from_abc_index(activation, unit, &abc_trait.metadata)?,
             },
@@ -216,8 +164,8 @@ impl<'gc> Trait<'gc> {
                 name,
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Getter {
-                    disp_id: *disp_id,
-                    method: unit.load_method(*method, false, activation)?,
+                    disp_id,
+                    method: unit.load_method(method, false, activation)?,
                 },
                 metadata: Metadata::from_abc_index(activation, unit, &abc_trait.metadata)?,
             },
@@ -225,8 +173,8 @@ impl<'gc> Trait<'gc> {
                 name,
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Setter {
-                    disp_id: *disp_id,
-                    method: unit.load_method(*method, false, activation)?,
+                    disp_id,
+                    method: unit.load_method(method, false, activation)?,
                 },
                 metadata: Metadata::from_abc_index(activation, unit, &abc_trait.metadata)?,
             },
@@ -234,7 +182,7 @@ impl<'gc> Trait<'gc> {
                 name,
                 attributes: trait_attribs_from_abc_traits(abc_trait),
                 kind: TraitKind::Class {
-                    slot_id: *slot_id,
+                    slot_id,
                     class: unit.load_class(class.0, activation)?,
                 },
                 metadata: Metadata::from_abc_index(activation, unit, &abc_trait.metadata)?,
@@ -245,16 +193,16 @@ impl<'gc> Trait<'gc> {
                 type_name,
                 value,
             } => {
-                let type_name = unit.pool_multiname_static_any(activation, *type_name)?;
+                let type_name = unit.pool_multiname_static_any(activation, type_name)?;
                 let default_value = slot_default_value(unit, value, type_name, activation)?;
                 Trait {
                     name,
                     attributes: trait_attribs_from_abc_traits(abc_trait),
                     kind: TraitKind::Const {
-                        slot_id: *slot_id,
+                        slot_id,
                         type_name,
                         default_value,
-                        unit: Some(unit),
+                        domain: unit.domain(),
                     },
                     metadata: Metadata::from_abc_index(activation, unit, &abc_trait.metadata)?,
                 }
@@ -357,7 +305,7 @@ impl<'gc> Trait<'gc> {
 /// If no default value is supplied, the "null" value for the type's trait is returned.
 fn slot_default_value<'gc>(
     translation_unit: TranslationUnit<'gc>,
-    value: &Option<AbcDefaultValue>,
+    value: Option<AbcDefaultValue>,
     type_name: Option<Gc<'gc, Multiname<'gc>>>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {

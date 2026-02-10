@@ -1,7 +1,8 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::amf::deserialize_value;
+use crate::avm2::function::FunctionArgs;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{ClassObject, EventObject, Object, ObjectPtr, TObject};
+use crate::avm2::object::{ClassObject, EventObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::{Avm2, Domain, Error};
 use crate::context::UpdateContext;
@@ -10,7 +11,8 @@ use crate::string::AvmString;
 use core::fmt;
 use flash_lso::types::Value as AmfValue;
 use gc_arena::barrier::unlock;
-use gc_arena::{lock::Lock, Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::Lock};
+use ruffle_common::utils::HasPrefixField;
 use ruffle_macros::istr;
 use std::cell::RefCell;
 
@@ -51,7 +53,7 @@ impl fmt::Debug for LocalConnectionObject<'_> {
     }
 }
 
-#[derive(Collect)]
+#[derive(Collect, HasPrefixField)]
 #[collect(no_drop)]
 #[repr(C, align(8))]
 pub struct LocalConnectionObjectData<'gc> {
@@ -63,17 +65,12 @@ pub struct LocalConnectionObjectData<'gc> {
     client: Lock<Option<Object<'gc>>>,
 }
 
-const _: () = assert!(std::mem::offset_of!(LocalConnectionObjectData, base) == 0);
-const _: () = assert!(
-    std::mem::align_of::<LocalConnectionObjectData>() == std::mem::align_of::<ScriptObjectData>()
-);
-
 impl<'gc> LocalConnectionObject<'gc> {
-    pub fn is_connected(&self) -> bool {
+    pub fn is_connected(self) -> bool {
         self.0.connection_handle.borrow().is_some()
     }
 
-    pub fn client(&self) -> Object<'gc> {
+    pub fn client(self) -> Object<'gc> {
         self.0.client.get().expect("Client must be initialized")
     }
 
@@ -81,14 +78,14 @@ impl<'gc> LocalConnectionObject<'gc> {
         unlock!(Gc::write(mc, self.0), LocalConnectionObjectData, client).set(Some(client));
     }
 
-    pub fn connect(&self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
+    pub fn connect(self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
         if self.is_connected() {
             return false;
         }
 
         let connection_handle = activation.context.local_connections.connect(
-            &LocalConnections::get_domain(activation.context.swf.url()),
-            (activation.domain(), *self),
+            &LocalConnections::get_domain(activation.context.root_swf.url()),
+            (activation.domain(), self),
             &name,
         );
         let result = connection_handle.is_some();
@@ -98,13 +95,13 @@ impl<'gc> LocalConnectionObject<'gc> {
         result
     }
 
-    pub fn disconnect(&self, activation: &mut Activation<'_, 'gc>) {
+    pub fn disconnect(self, activation: &mut Activation<'_, 'gc>) {
         if let Some(conn_handle) = self.0.connection_handle.borrow_mut().take() {
             activation.context.local_connections.close(conn_handle);
         }
     }
 
-    pub fn send_status(&self, context: &mut UpdateContext<'gc>, status: AvmString<'gc>) {
+    pub fn send_status(self, context: &mut UpdateContext<'gc>, status: AvmString<'gc>) {
         let mut activation = Activation::from_nothing(context);
 
         let status_event_cls = activation.avm2().classes().statusevent;
@@ -121,11 +118,11 @@ impl<'gc> LocalConnectionObject<'gc> {
             ],
         );
 
-        Avm2::dispatch_event(activation.context, event, (*self).into());
+        Avm2::dispatch_event(activation.context, event, self.into());
     }
 
     pub fn run_method(
-        &self,
+        self,
         context: &mut UpdateContext<'gc>,
         domain: Domain<'gc>,
         method_name: AvmString<'gc>,
@@ -138,23 +135,40 @@ impl<'gc> LocalConnectionObject<'gc> {
             arguments
                 .push(deserialize_value(&mut activation, &argument).unwrap_or(Value::Undefined));
         }
+        let arguments = FunctionArgs::from_slice(&arguments);
 
         let client = Value::from(self.client());
-        if let Err(e) = client.call_public_property(method_name, &arguments, &mut activation) {
-            match e {
-                Error::AvmError(error) => {
+        if let Err(e) = client.call_public_property(method_name, arguments, &mut activation) {
+            match e.as_avm_error() {
+                Some(error) => {
                     let event_name = istr!("asyncError");
                     let async_error_event_cls = activation.avm2().classes().asyncerrorevent;
+
+                    let text = AvmString::new_utf8(
+                        activation.gc(),
+                        format!(
+                            "Error #2095: flash.net.LocalConnection was unable to invoke callback {method_name}."
+                        ),
+                    );
+
                     let event = EventObject::from_class_and_args(
                         &mut activation,
                         async_error_event_cls,
-                        &[event_name.into(), false.into(), false.into(), error, error],
+                        &[
+                            event_name.into(),
+                            false.into(),
+                            false.into(),
+                            text.into(),
+                            error,
+                        ],
                     );
 
-                    Avm2::dispatch_event(activation.context, event, (*self).into());
+                    Avm2::dispatch_event(activation.context, event, self.into());
                 }
                 _ => {
-                    tracing::error!("Unhandled error dispatching AVM2 LocalConnection method call to '{method_name}': {e}");
+                    tracing::error!(
+                        "Unhandled error dispatching AVM2 LocalConnection method call to '{method_name}': {e}"
+                    );
                 }
             }
         }
@@ -163,18 +177,6 @@ impl<'gc> LocalConnectionObject<'gc> {
 
 impl<'gc> TObject<'gc> for LocalConnectionObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
-        // SAFETY: Object data is repr(C), and a compile-time assert ensures
-        // that the ScriptObjectData stays at offset 0 of the struct- so the
-        // layouts are compatible
-
-        unsafe { Gc::cast(self.0) }
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        Gc::as_ptr(self.0) as *const ObjectPtr
-    }
-
-    fn as_local_connection_object(&self) -> Option<LocalConnectionObject<'gc>> {
-        Some(*self)
+        HasPrefixField::as_prefix_gc(self.0)
     }
 }

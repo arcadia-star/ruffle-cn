@@ -1,8 +1,8 @@
 use crate::external_interface::JavascriptInterface;
 use crate::navigator::{OpenUrlMode, WebNavigatorBackend};
 use crate::{
-    audio, log_adapter, storage, ui, JavascriptPlayer, RuffleHandle, SocketProxy,
-    RUFFLE_GLOBAL_PANIC,
+    DeviceFontRenderer, JavascriptPlayer, RUFFLE_GLOBAL_PANIC, RuffleHandle, ScrollingBehavior,
+    SocketProxy, audio, log_adapter, storage, ui,
 };
 use js_sys::{Promise, RegExp};
 use ruffle_core::backend::audio::{AudioBackend, NullAudioBackend};
@@ -11,14 +11,14 @@ use ruffle_core::backend::ui::FontDefinition;
 use ruffle_core::compatibility_rules::CompatibilityRules;
 use ruffle_core::config::{Letterbox, NetworkingAccessMode};
 use ruffle_core::events::{GamepadButton, KeyCode};
+use ruffle_core::font::{DefaultFont, FontFileData};
 use ruffle_core::ttf_parser;
-use ruffle_core::{
-    swf, Color, DefaultFont, Player, PlayerBuilder, PlayerRuntime, StageAlign, StageScaleMode,
-};
+use ruffle_core::{Color, Player, PlayerBuilder, PlayerRuntime, StageAlign, StageScaleMode, swf};
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::quality::StageQuality;
 use ruffle_video_external::backend::ExternalVideoBackend;
 use ruffle_web_common::JsResult;
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -26,8 +26,8 @@ use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::Registry;
+use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_wasm::{WASMLayer, WASMLayerConfigBuilder};
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, HtmlElement};
@@ -64,6 +64,8 @@ pub struct RuffleInstanceBuilder {
     pub(crate) custom_fonts: Vec<(String, Vec<u8>)>,
     pub(crate) gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
     pub(crate) url_rewrite_rules: Vec<(RegExp, String)>,
+    pub(crate) scrolling_behavior: ScrollingBehavior,
+    pub(crate) device_font_renderer: DeviceFontRenderer,
 }
 
 impl Default for RuffleInstanceBuilder {
@@ -102,6 +104,8 @@ impl Default for RuffleInstanceBuilder {
             custom_fonts: vec![],
             gamepad_button_mapping: HashMap::new(),
             url_rewrite_rules: vec![],
+            scrolling_behavior: ScrollingBehavior::Smart,
+            device_font_renderer: DeviceFontRenderer::Embedded,
         }
     }
 }
@@ -335,6 +339,25 @@ impl RuffleInstanceBuilder {
         self.url_rewrite_rules.push((regexp, replacement));
     }
 
+    #[wasm_bindgen(js_name = "setScrollingBehavior")]
+    pub fn set_scrolling_behavior(&mut self, scrolling_behavior: String) {
+        self.scrolling_behavior = match scrolling_behavior.as_str() {
+            "always" => ScrollingBehavior::Always,
+            "never" => ScrollingBehavior::Never,
+            "smart" => ScrollingBehavior::Smart,
+            _ => return,
+        };
+    }
+
+    #[wasm_bindgen(js_name = "setDeviceFontRenderer")]
+    pub fn set_device_font_renderer(&mut self, device_font_renderer: String) {
+        self.device_font_renderer = match device_font_renderer.as_str() {
+            "embedded" => DeviceFontRenderer::Embedded,
+            "canvas" => DeviceFontRenderer::Canvas,
+            _ => return,
+        };
+    }
+
     // TODO: This should be split into two methods that either load url or load data
     // Right now, that's done immediately afterwards in TS
     pub async fn build(&self, parent: HtmlElement, js_player: JavascriptPlayer) -> Promise {
@@ -348,7 +371,7 @@ impl RuffleInstanceBuilder {
 
             let ruffle = RuffleHandle::new_internal(parent, js_player, copy)
                 .await
-                .map_err(|err| JsValue::from(format!("Error creating player: {}", err)))?;
+                .map_err(|err| JsValue::from(format!("Error creating player: {err}")))?;
             Ok(JsValue::from(ruffle))
         })
     }
@@ -378,47 +401,48 @@ impl RuffleInstanceBuilder {
                 }
             } else {
                 tracing::debug!("Loading font {font_name} as SWF font");
-                if let Ok(swf_stream) = swf::decompress_swf(&bytes[..]) {
-                    if let Ok(swf) = swf::parse_swf(&swf_stream) {
-                        let encoding = swf::SwfStr::encoding_for_version(swf.header.version());
-                        for tag in swf.tags {
-                            match tag {
-                                swf::Tag::DefineFont(_font) => {
-                                    tracing::warn!("DefineFont1 tag is not yet supported by Ruffle, inside font swf {font_name}");
-                                }
-                                swf::Tag::DefineFont2(font) => {
-                                    tracing::debug!(
-                                        "Loaded font {} from font swf {font_name}",
-                                        font.name.to_str_lossy(encoding)
-                                    );
-                                    player.register_device_font(FontDefinition::SwfTag(
-                                        *font, encoding,
-                                    ));
-                                }
-                                swf::Tag::DefineFont4(font) => {
-                                    let name = font.name.to_str_lossy(encoding);
-                                    if let Some(data) = font.data {
-                                        tracing::debug!(
-                                            "Loaded font {name} from font swf {font_name}"
-                                        );
-                                        player.register_device_font(FontDefinition::FontFile {
-                                            name: name.to_string(),
-                                            is_bold: font.is_bold,
-                                            is_italic: font.is_italic,
-                                            data: data.to_vec(),
-                                            index: 0,
-                                        })
-                                    } else {
-                                        tracing::warn!(
-                                            "Font {name} from font swf {font_name} contains no data"
-                                        );
-                                    }
-                                }
-                                _ => {}
+                if let Ok(swf_stream) = swf::decompress_swf(&bytes[..])
+                    && let Ok(swf) = swf::parse_swf(&swf_stream)
+                {
+                    let encoding = swf::SwfStr::encoding_for_version(swf.header.version());
+                    for tag in swf.tags {
+                        match tag {
+                            swf::Tag::DefineFont(_font) => {
+                                tracing::warn!(
+                                    "DefineFont1 tag is not yet supported by Ruffle, inside font swf {font_name}"
+                                );
                             }
+                            swf::Tag::DefineFont2(font) => {
+                                tracing::debug!(
+                                    "Loaded font {} from font swf {font_name}",
+                                    font.name.to_str_lossy(encoding)
+                                );
+                                player
+                                    .register_device_font(FontDefinition::SwfTag(*font, encoding));
+                            }
+                            swf::Tag::DefineFont4(font) => {
+                                let name = font.name.to_str_lossy(encoding);
+                                if let Some(data) = font.data {
+                                    tracing::debug!("Loaded font {name} from font swf {font_name}");
+                                    player.register_device_font(FontDefinition::FontFile {
+                                        name: name.to_string(),
+                                        is_bold: font.is_bold,
+                                        is_italic: font.is_italic,
+                                        // TODO remove when https://github.com/rust-lang/rust-clippy/issues/15252 is fixed
+                                        #[expect(clippy::unnecessary_to_owned)]
+                                        data: FontFileData::new(data.to_vec()),
+                                        index: 0,
+                                    })
+                                } else {
+                                    tracing::warn!(
+                                        "Font {name} from font swf {font_name} contains no data"
+                                    );
+                                }
+                            }
+                            _ => {}
                         }
-                        continue;
                     }
+                    continue;
                 }
                 tracing::warn!("Font source {font_name} was not recognised (not a valid SWF?)");
             }
@@ -437,9 +461,12 @@ impl RuffleInstanceBuilder {
         index: u32,
         player: &mut Player,
     ) {
+        // TODO A font may have multiple full names, what then?
         let full_name = face
             .names()
             .into_iter()
+            // Currently only unicode names are supported
+            .filter(|name| name.is_unicode())
             .find(|name| name.name_id == ttf_parser::name_id::FULL_NAME)
             .and_then(|name| name.to_string());
 
@@ -451,10 +478,10 @@ impl RuffleInstanceBuilder {
         };
 
         player.register_device_font(FontDefinition::FontFile {
-            name: name.to_string(),
+            name,
             is_bold: face.is_bold(),
             is_italic: face.is_italic(),
-            data: bytes,
+            data: FontFileData::new(bytes),
             index,
         });
     }
@@ -603,7 +630,7 @@ impl RuffleInstanceBuilder {
         &self,
         log_subscriber: Arc<Layered<WASMLayer, Registry>>,
     ) -> Box<dyn AudioBackend> {
-        if let Ok(audio) = audio::WebAudioBackend::new(log_subscriber.clone()) {
+        if let Ok(audio) = audio::WebAudioBackend::new(log_subscriber) {
             Box::new(audio)
         } else {
             tracing::error!("Unable to create audio backend. No audio will be played.");
@@ -621,7 +648,7 @@ impl RuffleInstanceBuilder {
             self.upgrade_to_https,
             self.url_rewrite_rules.clone(),
             self.base_url.clone(),
-            log_subscriber.clone(),
+            log_subscriber,
             self.open_url_mode,
             self.socket_proxy.clone(),
             self.credential_allow_list.clone(),
@@ -661,10 +688,16 @@ impl RuffleInstanceBuilder {
                 .with_fs_commands(interface);
         }
 
-        let trace_observer = Rc::new(RefCell::new(JsValue::UNDEFINED));
+        let trace_observer: Rc<RefCell<JsValue>> = Rc::new(RefCell::new(JsValue::UNDEFINED));
+        let use_canvas_font_renderer =
+            matches!(self.device_font_renderer, DeviceFontRenderer::Canvas);
         let core = builder
             .with_log(log_adapter::WebLogBackend::new(trace_observer.clone()))
-            .with_ui(ui::WebUiBackend::new(js_player.clone(), &canvas))
+            .with_ui(ui::WebUiBackend::new(
+                js_player.clone(),
+                &canvas,
+                use_canvas_font_renderer,
+            ))
             // `ExternalVideoBackend` has an internal `SoftwareVideoBackend` that it uses for any non-H.264 video.
             .with_video(ExternalVideoBackend::new_with_webcodecs(
                 log_subscriber.clone(),
@@ -688,8 +721,7 @@ impl RuffleInstanceBuilder {
             let mut core = core
                 .lock()
                 .expect("Failed to lock player after construction");
-            core.navigator_mut()
-                .downcast_mut::<WebNavigatorBackend>()
+            <dyn Any>::downcast_mut::<WebNavigatorBackend>(core.navigator_mut())
                 .expect("Expected WebNavigatorBackend")
                 .set_player(player_weak);
             // Set config parameters.
@@ -698,7 +730,10 @@ impl RuffleInstanceBuilder {
             core.set_show_menu(self.show_menu);
             core.set_allow_fullscreen(self.allow_fullscreen);
             core.set_window_mode(self.wmode.as_deref().unwrap_or("window"));
-            self.setup_fonts(&mut core);
+
+            if matches!(self.device_font_renderer, DeviceFontRenderer::Embedded) {
+                self.setup_fonts(&mut core);
+            }
         }
 
         Ok(BuiltPlayer {

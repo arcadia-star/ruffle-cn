@@ -1,11 +1,14 @@
+mod font_renderer;
+
 use super::JavascriptPlayer;
 use rfd::{AsyncFileDialog, FileHandle};
 use ruffle_core::backend::ui::{
     DialogLoaderError, DialogResultFuture, FileDialogResult, FileFilter,
 };
 use ruffle_core::backend::ui::{
-    FontDefinition, FullscreenError, LanguageIdentifier, MouseCursor, UiBackend, US_ENGLISH,
+    FontDefinition, FullscreenError, LanguageIdentifier, MouseCursor, US_ENGLISH, UiBackend,
 };
+use ruffle_core::font::FontQuery;
 use ruffle_web_common::JsResult;
 use std::borrow::Cow;
 use url::Url;
@@ -16,24 +19,6 @@ use web_sys::{
 
 use chrono::{DateTime, Utc};
 use js_sys::{Array, Uint8Array};
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct FullScreenError {
-    jsval: String,
-}
-
-impl std::fmt::Display for FullScreenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.jsval)
-    }
-}
-
-impl std::error::Error for FullScreenError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
 
 pub struct WebFileDialogResult {
     canceled: bool,
@@ -163,10 +148,16 @@ pub struct WebUiBackend {
 
     /// Is a dialog currently open
     dialog_open: bool,
+
+    use_canvas_font_renderer: bool,
 }
 
 impl WebUiBackend {
-    pub fn new(js_player: JavascriptPlayer, canvas: &HtmlCanvasElement) -> Self {
+    pub fn new(
+        js_player: JavascriptPlayer,
+        canvas: &HtmlCanvasElement,
+        use_canvas_font_renderer: bool,
+    ) -> Self {
         let window = web_sys::window().expect("window()");
         let preferred_language = window.navigator().language();
         let language = preferred_language
@@ -180,6 +171,7 @@ impl WebUiBackend {
             language,
             clipboard_content: "".into(),
             dialog_open: false,
+            use_canvas_font_renderer,
         }
     }
 
@@ -289,9 +281,9 @@ impl UiBackend for WebUiBackend {
         }
     }
 
-    fn display_root_movie_download_failed_message(&self, invalid_swf: bool) {
+    fn display_root_movie_download_failed_message(&self, invalid_swf: bool, fetch_error: String) {
         self.js_player
-            .display_root_movie_download_failed_message(invalid_swf)
+            .display_root_movie_download_failed_message(invalid_swf, fetch_error)
     }
 
     fn message(&self, message: &str) {
@@ -314,15 +306,47 @@ impl UiBackend for WebUiBackend {
         self.js_player.display_unsupported_video(url.as_str());
     }
 
-    fn load_device_font(
+    fn load_device_font(&self, query: &FontQuery, register: &mut dyn FnMut(FontDefinition)) {
+        if !self.use_canvas_font_renderer {
+            // In case we don't use the canvas font renderer,
+            // because fonts must be loaded instantly (no async),
+            // we actually just provide them all upfront at time of Player creation.
+            return;
+        }
+
+        let renderer =
+            font_renderer::CanvasFontRenderer::new(query.is_italic, query.is_bold, &query.name);
+
+        match renderer {
+            Ok(renderer) => {
+                tracing::info!(
+                    "Loaded a new canvas font renderer for font \"{}\", italic: {}, bold: {}",
+                    query.name,
+                    query.is_italic,
+                    query.is_bold
+                );
+                register(FontDefinition::ExternalRenderer {
+                    name: query.name.clone(),
+                    is_bold: query.is_bold,
+                    is_italic: query.is_italic,
+                    font_renderer: Box::new(renderer),
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to set up canvas font renderer for font \"{}\": {e:?}",
+                    query.name
+                )
+            }
+        }
+    }
+
+    fn sort_device_fonts(
         &self,
-        _name: &str,
-        _is_bold: bool,
-        _is_italic: bool,
+        _query: &FontQuery,
         _register: &mut dyn FnMut(FontDefinition),
-    ) {
-        // Because fonts must be loaded instantly (no async),
-        // we actually just provide them all upfront at time of Player creation.
+    ) -> Vec<FontQuery> {
+        Vec::new()
     }
 
     fn display_file_open_dialog(&mut self, filters: Vec<FileFilter>) -> Option<DialogResultFuture> {
@@ -333,26 +357,20 @@ impl UiBackend for WebUiBackend {
         self.dialog_open = true;
 
         // Create the dialog future
+        let is_mac = web_sys::window()
+            .expect("window()")
+            .navigator()
+            .platform()
+            .expect("navigator.platform")
+            .contains("Mac");
+
         Some(Box::pin(async move {
             let mut dialog = AsyncFileDialog::new();
 
-            for filter in filters {
-                let window = web_sys::window().expect("window()");
-                let navigator = window.navigator();
-                let platform = navigator.platform().expect("navigator.platform");
+            for filter in &filters {
+                let extensions = filter.extensions_for_dialog(is_mac);
 
-                if platform.contains("Mac") && filter.mac_type.is_some() {
-                    let mac_type = filter.mac_type.expect("Cant fail");
-                    let extensions: Vec<&str> = mac_type.split(';').collect();
-                    dialog = dialog.add_filter(&filter.description, &extensions);
-                } else {
-                    let extensions: Vec<&str> = filter
-                        .extensions
-                        .split(';')
-                        .map(|x| x.trim_start_matches("*."))
-                        .collect();
-                    dialog = dialog.add_filter(&filter.description, &extensions);
-                }
+                dialog = dialog.add_filter(&filter.description, &extensions);
             }
 
             let result: Result<Box<dyn FileDialogResult>, DialogLoaderError> = Ok(Box::new(

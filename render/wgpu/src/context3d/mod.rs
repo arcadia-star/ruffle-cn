@@ -4,25 +4,27 @@ use ruffle_render::backend::{
 };
 use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::error::Error;
+use std::any::Any;
 use std::cell::Cell;
 use swf::{Rectangle, Twips};
 
 use wgpu::util::StagingBelt;
 use wgpu::{
-    BindGroup, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureView, TextureViewDescriptor, COPY_BUFFER_ALIGNMENT,
-    COPY_BYTES_PER_ROW_ALIGNMENT,
+    BindGroup, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT, COPY_BYTES_PER_ROW_ALIGNMENT,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+    TextureViewDescriptor,
 };
 use wgpu::{CommandEncoder, Extent3d, RenderPass};
 
-use crate::context3d::current_pipeline::{BoundTextureData, AGAL_FLOATS_PER_REGISTER};
+use crate::Texture;
+use crate::context3d::current_pipeline::{AGAL_FLOATS_PER_REGISTER, BoundTextureData};
 use crate::descriptors::Descriptors;
 use crate::utils::supported_sample_count;
-use crate::Texture;
 
 use std::num::NonZeroU64;
 use std::rc::Rc;
 use std::sync::Arc;
+use tracing::instrument;
 
 mod current_pipeline;
 mod shader_pair;
@@ -35,19 +37,7 @@ const COLOR_MASK: u32 = 1 << 0;
 const DEPTH_MASK: u32 = 1 << 1;
 const STENCIL_MASK: u32 = 1 << 2;
 
-/// A wgpu-based implemented of `Context3D`.
-/// Many of the WGPU methods have very strict lifetime requirements
-/// (e.g. taking in a reference that lives as long as the `RenderPass`).
-/// As a result, most methods buffer a `Context3DCommand` without actually
-/// calling any WGPU methods. The commands are then executed in `present`
-///
-/// The main exception to this are `create_vertex_buffer` and `create_index_buffer`.
-/// These methods immediately create a `wgpu::Buffer`. This greatly simplifies
-/// lifetime management - we can store an `Rc<dyn VertexBuffer>` or `Rc<dyn IndexBuffer>`
-/// in the `VertexBuffer3DObject` or `IndexBuffer3DObject`. If we delayed creating them,
-/// we would need to store a `GcCell<Option<Rc<dyn VertexBuffer>>>`, which prevents
-/// us from obtaining a long-lived reference to the `wgpu:Buffer` (it would instead be
-/// tied to the `Ref` returned by `GcCell::read`).
+/// A wgpu-based implementation of `Context3D`.
 pub struct WgpuContext3D {
     // We only use some of the fields from `Descriptors`, but we
     // store an entire `Arc<Descriptors>` rather than wrapping the fields
@@ -210,29 +200,6 @@ impl WgpuContext3D {
             .update_target_format(TextureFormat::Rgba8Unorm);
     }
 
-    pub(crate) fn present(&mut self) {
-        std::mem::swap(
-            &mut self.back_buffer_raw_texture_handle,
-            &mut self.front_buffer_raw_texture_handle,
-        );
-        std::mem::swap(
-            &mut self.back_buffer_texture_view,
-            &mut self.front_buffer_texture_view,
-        );
-        std::mem::swap(
-            &mut self.back_buffer_resolve_texture_view,
-            &mut self.front_buffer_resolve_texture_view,
-        );
-        std::mem::swap(
-            &mut self.back_buffer_depth_texture_view,
-            &mut self.front_buffer_depth_texture_view,
-        );
-
-        self.set_render_to_back_buffer();
-        self.seen_clear_command = false;
-        self.clear_color = None;
-    }
-
     fn make_render_pass<'a>(
         &'a mut self,
         command_encoder: &'a mut CommandEncoder,
@@ -281,6 +248,7 @@ impl WgpuContext3D {
                     load: color_load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment,
             ..Default::default()
@@ -702,10 +670,7 @@ impl Context3D for WgpuContext3D {
                 if data.is_empty() {
                     return;
                 }
-                let buffer: &mut IndexBufferWrapper = buffer
-                    .as_any_mut()
-                    .downcast_mut::<IndexBufferWrapper>()
-                    .unwrap();
+                let buffer: &mut IndexBufferWrapper = <dyn Any>::downcast_mut(buffer).unwrap();
 
                 // Unfortunately, ActionScript works with 2-byte indices, while wgpu requires
                 // copy offsets and sizes to have 4-byte alignment. To support this, we need
@@ -720,7 +685,7 @@ impl Context3D for WgpuContext3D {
                     offset_bytes - (offset_bytes % COPY_BUFFER_ALIGNMENT as usize);
                 let rounded_up_length = align_copy_buffer_size(data.len());
 
-                buffer.data[offset_bytes..(offset_bytes + data.len())].copy_from_slice(&data);
+                buffer.data[offset_bytes..(offset_bytes + data.len())].copy_from_slice(data);
                 self.buffer_staging_belt
                     .write_buffer(
                         &mut self.buffer_command_encoder,
@@ -745,11 +710,8 @@ impl Context3D for WgpuContext3D {
                     return;
                 }
 
-                let buffer: Rc<VertexBufferWrapper> = buffer
-                    .clone()
-                    .into_any_rc()
-                    .downcast::<VertexBufferWrapper>()
-                    .unwrap();
+                let buffer: Rc<VertexBufferWrapper> =
+                    Rc::<dyn Any>::downcast(buffer.clone()).unwrap();
 
                 // ActionScript can only work with 32-bit chunks of data, so our `write_buffer`
                 // offset and size will always be a multiple of `COPY_BUFFER_ALIGNMENT` (4 bytes)
@@ -761,7 +723,7 @@ impl Context3D for WgpuContext3D {
                     NonZeroU64::new(data.len() as u64).unwrap(),
                     &self.descriptors.device,
                 )[..data.len()]
-                    .copy_from_slice(&data);
+                    .copy_from_slice(data);
             }
 
             Context3DCommand::SetRenderToTexture {
@@ -782,12 +744,15 @@ impl Context3D for WgpuContext3D {
                             wgpu::Backend::Gl
                         )
                     {
-                        tracing::warn!("Context.setRenderToTexture with antiAlias > 1 is not yet supported on WebGL");
+                        tracing::warn!(
+                            "Context.setRenderToTexture with antiAlias > 1 is not yet supported on WebGL"
+                        );
                         sample_count = 1;
                     }
                 }
 
-                let texture_wrapper = texture.as_any().downcast_ref::<TextureWrapper>().unwrap();
+                let texture_wrapper =
+                    <dyn Any>::downcast_ref::<TextureWrapper>(texture.as_ref()).unwrap();
                 self.current_texture_size = Some(Extent3d {
                     width: texture_wrapper.texture.width(),
                     height: texture_wrapper.texture.height(),
@@ -862,10 +827,8 @@ impl Context3D for WgpuContext3D {
                 first_index,
                 num_triangles,
             } => {
-                let index_buffer: &IndexBufferWrapper = index_buffer
-                    .as_any()
-                    .downcast_ref::<IndexBufferWrapper>()
-                    .unwrap();
+                let index_buffer: &IndexBufferWrapper =
+                    <dyn Any>::downcast_ref(index_buffer).unwrap();
 
                 let indices =
                     (first_index as u32)..((first_index as u32) + (num_triangles as u32 * 3));
@@ -926,11 +889,8 @@ impl Context3D for WgpuContext3D {
                 buffer_offset,
             } => {
                 let info = if let Some((buffer, format)) = buffer {
-                    let buffer = buffer
-                        .clone()
-                        .into_any_rc()
-                        .downcast::<VertexBufferWrapper>()
-                        .unwrap();
+                    let buffer =
+                        Rc::<dyn Any>::downcast::<VertexBufferWrapper>(buffer.clone()).unwrap();
 
                     Some(VertexAttributeInfo {
                         buffer,
@@ -958,8 +918,7 @@ impl Context3D for WgpuContext3D {
             }
 
             Context3DCommand::SetShaders { module } => {
-                let shaders =
-                    module.map(|shader| shader.into_any_rc().downcast::<ShaderPairAgal>().unwrap());
+                let shaders = module.map(|shader| Rc::<dyn Any>::downcast(shader).unwrap());
 
                 self.current_pipeline.set_shaders(shaders)
             }
@@ -1002,13 +961,13 @@ impl Context3D for WgpuContext3D {
                 self.current_pipeline.set_culling(face);
             }
             Context3DCommand::CopyBitmapToTexture {
-                mut source,
+                source,
                 source_width,
                 source_height,
                 dest,
                 layer,
             } => {
-                let dest = dest.as_any().downcast_ref::<TextureWrapper>().unwrap();
+                let dest = Rc::<dyn Any>::downcast::<TextureWrapper>(dest).unwrap();
 
                 // Unfortunately, we need to copy from the CPU data, rather than using the GPU texture.
                 // The GPU side of a BitmapData can be updated at any time from non-Stage3D code.
@@ -1016,37 +975,45 @@ impl Context3D for WgpuContext3D {
                 // BitmapData's gpu texture might be modified before we actually submit
                 // `buffer_command_encoder` to the device.
                 let dest_format = dest.texture.format();
-                let mut bytes_per_row = dest_format.block_copy_size(None).unwrap()
+                let src_bytes_per_row = dest_format.block_copy_size(None).unwrap()
                     * (source_width / dest_format.block_dimensions().0);
 
                 let rows_per_image = source_height / dest_format.block_dimensions().1;
 
                 // Wgpu requires us to pad the image rows to a multiple of COPY_BYTES_PER_ROW_ALIGNMENT
-                if (source_width * 4) % COPY_BYTES_PER_ROW_ALIGNMENT != 0
-                    && matches!(dest.texture.format(), wgpu::TextureFormat::Rgba8Unorm)
-                {
-                    source = source
-                        .chunks_exact(source_width as usize * 4)
-                        .flat_map(|row| {
-                            let padding_len = COPY_BYTES_PER_ROW_ALIGNMENT as usize
-                                - (row.len() % COPY_BYTES_PER_ROW_ALIGNMENT as usize);
-                            let padding = vec![0; padding_len];
-                            row.iter().copied().chain(padding)
-                        })
-                        .collect();
-
-                    bytes_per_row = source.len() as u32 / source_height;
-                }
+                let dest_bytes_per_row =
+                    if matches!(dest.texture.format(), wgpu::TextureFormat::Rgba8Unorm) {
+                        (source_width * 4).next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT)
+                    } else {
+                        src_bytes_per_row
+                    };
+                let dest_size = dest_bytes_per_row as u64 * rows_per_image as u64;
+                assert!(
+                    dest_bytes_per_row >= src_bytes_per_row && dest_size >= source.len() as u64
+                );
 
                 let texture_buffer = self.descriptors.device.create_buffer(&BufferDescriptor {
                     label: None,
-                    size: source.len() as u64,
+                    size: dest_size,
                     usage: BufferUsages::COPY_SRC,
                     mapped_at_creation: true,
                 });
 
                 let mut texture_buffer_view = texture_buffer.slice(..).get_mapped_range_mut();
-                texture_buffer_view.copy_from_slice(&source);
+                if dest_bytes_per_row == src_bytes_per_row {
+                    // No padding, we can copy everything in one go.
+                    texture_buffer_view.copy_from_slice(source);
+                } else {
+                    // Copy row by row.
+                    for (dest, src) in texture_buffer_view
+                        .chunks_exact_mut(dest_bytes_per_row as usize)
+                        .zip(source.chunks_exact(src_bytes_per_row as usize))
+                    {
+                        let (dest, padding) = dest.split_at_mut(src_bytes_per_row as usize);
+                        dest.copy_from_slice(src);
+                        padding.fill(0);
+                    }
+                }
                 drop(texture_buffer_view);
                 texture_buffer.unmap();
 
@@ -1056,7 +1023,7 @@ impl Context3D for WgpuContext3D {
                         // The copy source uses the padded image data, with larger rows
                         layout: wgpu::TexelCopyBufferLayout {
                             offset: 0,
-                            bytes_per_row: Some(bytes_per_row),
+                            bytes_per_row: Some(dest_bytes_per_row),
                             rows_per_image: Some(rows_per_image),
                         },
                     },
@@ -1085,7 +1052,7 @@ impl Context3D for WgpuContext3D {
             } => {
                 let bound_texture = if let Some(texture) = texture {
                     let texture_wrapper =
-                        texture.as_any().downcast_ref::<TextureWrapper>().unwrap();
+                        <dyn Any>::downcast_ref::<TextureWrapper>(texture.as_ref()).unwrap();
 
                     let mut view: wgpu::TextureViewDescriptor = Default::default();
                     if cube {
@@ -1094,8 +1061,8 @@ impl Context3D for WgpuContext3D {
                     }
 
                     Some(BoundTextureData {
-                        id: texture.clone(),
                         view: texture_wrapper.texture.create_view(&view),
+                        id: texture,
                         cube,
                     })
                 } else {
@@ -1209,6 +1176,30 @@ impl Context3D for WgpuContext3D {
                 self.scissor_rectangle = rect;
             }
         }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn present(&mut self) {
+        std::mem::swap(
+            &mut self.back_buffer_raw_texture_handle,
+            &mut self.front_buffer_raw_texture_handle,
+        );
+        std::mem::swap(
+            &mut self.back_buffer_texture_view,
+            &mut self.front_buffer_texture_view,
+        );
+        std::mem::swap(
+            &mut self.back_buffer_resolve_texture_view,
+            &mut self.front_buffer_resolve_texture_view,
+        );
+        std::mem::swap(
+            &mut self.back_buffer_depth_texture_view,
+            &mut self.front_buffer_depth_texture_view,
+        );
+
+        self.set_render_to_back_buffer();
+        self.seen_clear_command = false;
+        self.clear_color = None;
     }
 }
 

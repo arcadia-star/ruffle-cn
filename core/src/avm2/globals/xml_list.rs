@@ -2,13 +2,13 @@
 
 pub use crate::avm2::object::xml_list_allocator;
 use crate::avm2::{
-    e4x::{name_to_multiname, simple_content_to_string, E4XNode, E4XNodeKind},
+    Activation, Error, TObject, Value,
+    e4x::{E4XNode, E4XNodeKind, name_to_multiname, simple_content_to_string},
     error::make_error_1086,
     globals::methods::xml as xml_methods,
     multiname::Multiname,
     object::{E4XOrXml, XmlListObject, XmlObject},
     parameters::ParametersExt,
-    Activation, Error, TObject, Value,
 };
 use crate::string::AvmString;
 
@@ -36,7 +36,7 @@ pub fn init<'gc>(
     let this = this.as_object().unwrap();
 
     let this = this.as_xml_list_object().unwrap();
-    let value = args[0];
+    let value = args.get_value(0);
     let ignore_comments = args.get_bool(1);
     let ignore_processing_instructions = args.get_bool(2);
     let ignore_whitespace = args.get_bool(3);
@@ -66,9 +66,9 @@ pub fn init<'gc>(
             );
         }
         Err(e) => {
-            return Err(Error::RustError(
+            return Err(Error::rust_error(
                 format!("Failed to parse XML: {e:?}").into(),
-            ))
+            ));
         }
     }
 
@@ -106,7 +106,7 @@ pub fn elements<'gc>(
 
     let this = this.as_xml_list_object().unwrap();
     // 2. Let name = ToXMLName(name)
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
 
     // 3. Let m = a new XMLList with m.[[TargetObject]] = list and m.[[TargetProperty]] = name
     let list = XmlListObject::new(activation, Some(this.into()), Some(multiname.clone()));
@@ -203,7 +203,7 @@ pub fn child<'gc>(
     let this = this.as_object().unwrap();
 
     let this = this.as_xml_list_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
     let mut children = this.children_mut(activation.gc());
 
     // 1. Let m be a new XMLList with m.[[TargetObject]] = list
@@ -235,7 +235,7 @@ pub fn children<'gc>(
     let children = list.children();
     let mut sub_children = Vec::new();
     for child in &*children {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             sub_children.extend(children.iter().map(|node| E4XOrXml::E4X(*node)));
         }
     }
@@ -298,13 +298,12 @@ pub fn attribute<'gc>(
 
     let list = this.as_xml_list_object().unwrap();
 
-    let name = args[0];
-    let multiname = name_to_multiname(activation, &name, true)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), true)?;
 
     let children = list.children();
     let mut sub_children = Vec::new();
     for child in &*children {
-        if let E4XNodeKind::Element { ref attributes, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { attributes, .. } = &*child.node().kind() {
             if let Some(found) = attributes
                 .iter()
                 .find(|node| node.matches_name(&multiname))
@@ -336,7 +335,7 @@ pub fn attributes<'gc>(
 
     let mut child_attrs = Vec::new();
     for child in list.children().iter() {
-        if let E4XNodeKind::Element { ref attributes, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { attributes, .. } = &*child.node().kind() {
             child_attrs.extend(attributes.iter().map(|node| E4XOrXml::E4X(*node)));
         }
     }
@@ -358,7 +357,7 @@ pub fn descendants<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
     if let Some(descendants) = this.xml_descendants(activation, &multiname) {
         Ok(descendants.into())
     } else {
@@ -377,7 +376,7 @@ pub fn text<'gc>(
     let xml_list = this.as_xml_list_object().unwrap();
     let mut nodes = Vec::new();
     for child in xml_list.children().iter() {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             nodes.extend(
                 children
                     .iter()
@@ -401,7 +400,7 @@ pub fn comments<'gc>(
     let xml_list = this.as_xml_list_object().unwrap();
     let mut nodes = Vec::new();
     for child in xml_list.children().iter() {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             nodes.extend(
                 children
                     .iter()
@@ -463,10 +462,10 @@ pub fn processing_instructions<'gc>(
     let this = this.as_object().unwrap();
 
     let xml_list = this.as_xml_list_object().unwrap();
-    let multiname = name_to_multiname(activation, &args[0], false)?;
+    let multiname = name_to_multiname(activation, args.get_value(0), false)?;
     let mut nodes = Vec::new();
     for child in xml_list.children().iter() {
-        if let E4XNodeKind::Element { ref children, .. } = &*child.node().kind() {
+        if let E4XNodeKind::Element { children, .. } = &*child.node().kind() {
             nodes.extend(
                 children
                     .iter()
@@ -647,11 +646,8 @@ pub fn namespace_internal_impl<'gc>(
     let list = this.as_xml_list_object().unwrap();
     let mut children = list.children_mut(activation.gc());
 
-    let args = if args[0] == Value::Bool(true) {
-        &args[1..]
-    } else {
-        &[]
-    };
+    let has_prefix = args.get_bool(0);
+    let args = if has_prefix { &args[1..] } else { &[] };
 
     match &mut children[..] {
         [child] => Value::from(child.get_or_create_xml(activation)).call_method(

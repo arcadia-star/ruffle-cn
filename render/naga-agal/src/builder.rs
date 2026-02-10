@@ -15,8 +15,8 @@ use num_traits::FromPrimitive;
 
 use crate::varying::VaryingRegisters;
 use crate::{
-    types::*, Error, ShaderType, VertexAttributeFormat, MAX_TEXTURES, MAX_VERTEX_ATTRIBUTES,
-    SHADER_ENTRY_POINT,
+    Error, MAX_TEXTURES, MAX_VERTEX_ATTRIBUTES, SHADER_ENTRY_POINT, ShaderType,
+    VertexAttributeFormat, types::*,
 };
 
 const VERTEX_PROGRAM_CONSTANTS: u64 = 128;
@@ -154,7 +154,7 @@ impl VertexAttributeFormat {
     }
 
     fn extend_to_float4(
-        &self,
+        self,
         base_expr: Handle<Expression>,
         builder: &mut NagaBuilder,
     ) -> Result<Handle<Expression>> {
@@ -245,7 +245,7 @@ impl VertexAttributeFormat {
 pub struct ShaderConfig<'a> {
     pub shader_type: ShaderType,
     pub vertex_attributes: &'a [Option<VertexAttributeFormat>; 8],
-    #[allow(dead_code)] // set but never read
+    #[expect(dead_code)] // set but never read
     pub sampler_configs: &'a [SamplerConfig; 8],
     pub version: AgalVersion,
 }
@@ -354,6 +354,8 @@ impl<'a> NagaBuilder<'a> {
         Ok(sampler_configs)
     }
 
+    // We're passing the reference along anyway.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn build_module(
         agal: &[u8],
         vertex_attributes: &[Option<VertexAttributeFormat>; MAX_VERTEX_ATTRIBUTES],
@@ -509,7 +511,7 @@ impl<'a> NagaBuilder<'a> {
                             location: 0,
                             interpolation: None,
                             sampling: None,
-                            second_blend_source: false,
+                            blend_src: None,
                         }),
                         offset: 0,
                     }],
@@ -532,7 +534,7 @@ impl<'a> NagaBuilder<'a> {
                         location: 0,
                         interpolation: None,
                         sampling: None,
-                        second_blend_source: false,
+                        blend_src: None,
                     }),
                 });
             }
@@ -644,7 +646,7 @@ impl<'a> NagaBuilder<'a> {
                     location: index as u32,
                     interpolation: None,
                     sampling: None,
-                    second_blend_source: false,
+                    blend_src: None,
                 }),
             });
 
@@ -664,7 +666,7 @@ impl<'a> NagaBuilder<'a> {
         if self.temporary_registers[index].is_none() {
             let local = self.func.local_variables.append(
                 LocalVariable {
-                    name: Some(format!("temporary{}", index)),
+                    name: Some(format!("temporary{index}")),
                     ty: self.vec4f,
                     init: None,
                 },
@@ -730,7 +732,7 @@ impl<'a> NagaBuilder<'a> {
         if self.texture_bindings[index].is_none() {
             let global_var = self.module.global_variables.append(
                 GlobalVariable {
-                    name: Some(format!("texture{}", index)),
+                    name: Some(format!("texture{index}")),
                     space: AddressSpace::Handle,
                     binding: Some(ResourceBinding {
                         group: 0,
@@ -749,7 +751,7 @@ impl<'a> NagaBuilder<'a> {
 
             let sampler_var = self.module.global_variables.append(
                 GlobalVariable {
-                    name: Some(format!("sampler{}", index)),
+                    name: Some(format!("sampler{index}")),
                     space: naga::AddressSpace::Handle,
                     binding: Some(naga::ResourceBinding {
                         group: 0,
@@ -842,12 +844,19 @@ impl<'a> NagaBuilder<'a> {
                     RegisterType::Constant => {
                         // Load the index register (e.g. 'va0') as normal, and access the component
                         // given by 'index_select' (e.g. 'x'). This is 'va0.x' in the above example.
-                        let (base_index, _format) =
+                        let (base_index, format) =
                             load_register(&source.index_type, source.reg_num as usize)?;
-                        let index_expr = self.evaluate_expr(Expression::AccessIndex {
-                            base: base_index,
-                            index: source.index_select as u32,
-                        });
+
+                        // If the index register is a scalar (Float1), use it directly.
+                        // Otherwise, extract the component given by 'index_select'.
+                        let index_expr = if format == VertexAttributeFormat::Float1 {
+                            base_index
+                        } else {
+                            self.evaluate_expr(Expression::AccessIndex {
+                                base: base_index,
+                                index: source.index_select as u32,
+                            })
+                        };
 
                         // Convert to an integer, since we're going to be indexing an array
                         let index_integer = self.evaluate_expr(Expression::As {
@@ -902,7 +911,7 @@ impl<'a> NagaBuilder<'a> {
                         return Err(Error::Unimplemented(format!(
                             "Unimplemented register type in indirect mode {:?}",
                             source.register_type
-                        )))
+                        )));
                     }
                 }
             }
@@ -946,7 +955,7 @@ impl<'a> NagaBuilder<'a> {
             _ => {
                 return Err(Error::Unimplemented(format!(
                     "Unimplemented dest reg type: {dest:?}",
-                )))
+                )));
             }
         };
 
@@ -1149,7 +1158,7 @@ impl<'a> NagaBuilder<'a> {
 
                 let texture_id = sampler_field.reg_num;
                 if sampler_field.reg_type != RegisterType::Sampler {
-                    panic!("Invalid sample register type {:?}", sampler_field);
+                    panic!("Invalid sample register type {sampler_field:?}");
                 }
 
                 let coord = self.emit_source_field_load(source1, false)?;
@@ -1194,6 +1203,7 @@ impl<'a> NagaBuilder<'a> {
                     level: naga::SampleLevel::Auto,
                     depth_ref: None,
                     gather: None,
+                    clamp_to_edge: false,
                 });
                 self.emit_dest_store(dest, tex)?;
             }
@@ -1412,7 +1422,7 @@ impl<'a> NagaBuilder<'a> {
                         });
                     }
                     BlockStackEntry::Normal(block) => {
-                        panic!("Eif opcode without matching 'if': {:?}", block)
+                        panic!("Eif opcode without matching 'if': {block:?}")
                     }
                 }
             }
@@ -1651,7 +1661,7 @@ impl<'a> NagaBuilder<'a> {
 
         let block = match self.blocks.pop().unwrap() {
             BlockStackEntry::Normal(block) => block,
-            block => panic!("Unfinished if statement: {:?}", block),
+            block => panic!("Unfinished if statement: {block:?}"),
         };
 
         if !self.blocks.is_empty() {

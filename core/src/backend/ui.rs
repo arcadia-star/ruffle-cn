@@ -1,10 +1,12 @@
-use crate::backend::navigator::OwnedFuture;
 pub use crate::loader::Error as DialogLoaderError;
+use crate::{
+    backend::navigator::OwnedFuture,
+    font::{FontFileData, FontQuery, FontRenderer},
+};
 use chrono::{DateTime, Utc};
-use downcast_rs::Downcast;
-use fluent_templates::loader::langid;
 pub use fluent_templates::LanguageIdentifier;
-use std::borrow::Cow;
+use fluent_templates::loader::langid;
+use std::{any::Any, borrow::Cow};
 use url::Url;
 
 pub type FullscreenError = Cow<'static, str>;
@@ -19,8 +21,16 @@ pub enum FontDefinition<'a> {
         name: String,
         is_bold: bool,
         is_italic: bool,
-        data: Vec<u8>,
+        data: FontFileData,
         index: u32,
+    },
+
+    /// Font rendered externally.
+    ExternalRenderer {
+        name: String,
+        is_bold: bool,
+        is_italic: bool,
+        font_renderer: Box<dyn FontRenderer>,
     },
 }
 
@@ -37,8 +47,24 @@ pub struct FileFilter {
     pub mac_type: Option<String>,
 }
 
+impl FileFilter {
+    /// Returns extensions suitable for file dialogs.
+    /// When `is_mac` is true, uses `mac_type` if available; otherwise uses `extensions` with wildcards stripped.
+    /// `is_mac` should be true when the user uses a Mac.
+    pub fn extensions_for_dialog(&self, is_mac: bool) -> Vec<&str> {
+        if is_mac && let Some(mac_type) = &self.mac_type {
+            return mac_type.split(';').collect();
+        }
+
+        self.extensions
+            .split(';')
+            .map(|x| x.trim_start_matches("*."))
+            .collect()
+    }
+}
+
 /// A result of a file selection
-pub trait FileDialogResult: Downcast {
+pub trait FileDialogResult: Any {
     /// Was the file selection canceled by the user
     fn is_cancelled(&self) -> bool;
     fn creation_time(&self) -> Option<DateTime<Utc>>;
@@ -55,12 +81,11 @@ pub trait FileDialogResult: Downcast {
     /// the state at the time of the last refresh
     fn write_and_refresh(&mut self, data: &[u8]);
 }
-impl_downcast!(FileDialogResult);
 
 /// Future representing a file selection in process
 pub type DialogResultFuture = OwnedFuture<Box<dyn FileDialogResult>, DialogLoaderError>;
 
-pub trait UiBackend: Downcast {
+pub trait UiBackend: Any {
     fn mouse_visible(&self) -> bool;
 
     fn set_mouse_visible(&mut self, visible: bool);
@@ -84,7 +109,11 @@ pub trait UiBackend: Downcast {
     /// Displays a message about an error during root movie download.
     /// In particular, on web this can be a CORS error, which we can sidestep
     /// by providing a direct .swf link instead.
-    fn display_root_movie_download_failed_message(&self, _invalid_swf: bool);
+    fn display_root_movie_download_failed_message(
+        &self,
+        _invalid_swf: bool,
+        _fetched_error: String,
+    );
 
     // Unused, but kept in case we need it later.
     fn message(&self, message: &str);
@@ -103,13 +132,13 @@ pub trait UiBackend: Downcast {
     /// You may call `register` any amount of times with any amount of found device fonts.
     /// If you do not call `register` with any fonts that match the request,
     /// then the font will simply be marked as not found - this may or may not fall back to another font.
-    fn load_device_font(
+    fn load_device_font(&self, query: &FontQuery, register: &mut dyn FnMut(FontDefinition));
+
+    fn sort_device_fonts(
         &self,
-        name: &str,
-        is_bold: bool,
-        is_italic: bool,
+        query: &FontQuery,
         register: &mut dyn FnMut(FontDefinition),
-    );
+    ) -> Vec<FontQuery>;
 
     /// Displays a file selection dialog, returning None if the dialog cannot be displayed
     /// (e.g because it is already open)
@@ -129,7 +158,6 @@ pub trait UiBackend: Downcast {
     /// Mark that any previously open dialog has been closed
     fn close_file_dialog(&mut self);
 }
-impl_downcast!(UiBackend);
 
 /// A mouse cursor icon displayed by the Flash Player.
 /// Communicated from the core to the UI backend via `UiBackend::set_mouse_cursor`.
@@ -180,19 +208,21 @@ impl UiBackend for NullUiBackend {
         Ok(())
     }
 
-    fn display_root_movie_download_failed_message(&self, _invalid_swf: bool) {}
+    fn display_root_movie_download_failed_message(&self, _invalid_swf: bool, _fetch_error: String) {
+    }
 
     fn message(&self, _message: &str) {}
 
     fn display_unsupported_video(&self, _url: Url) {}
 
-    fn load_device_font(
+    fn load_device_font(&self, _query: &FontQuery, _register: &mut dyn FnMut(FontDefinition)) {}
+
+    fn sort_device_fonts(
         &self,
-        _name: &str,
-        _is_bold: bool,
-        _is_italic: bool,
+        _query: &FontQuery,
         _register: &mut dyn FnMut(FontDefinition),
-    ) {
+    ) -> Vec<FontQuery> {
+        Vec::new()
     }
 
     fn open_virtual_keyboard(&self) {}

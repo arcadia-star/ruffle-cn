@@ -136,6 +136,14 @@ export function configureBuilder(
             }
         }
     }
+
+    if (isExplicit(config.scrollingBehavior)) {
+        builder.setScrollingBehavior(config.scrollingBehavior);
+    }
+
+    if (isExplicit(config.deviceFontRenderer)) {
+        builder.setDeviceFontRenderer(config.deviceFontRenderer);
+    }
 }
 
 /**

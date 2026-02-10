@@ -3,7 +3,7 @@
 use ruffle_wstr::Units;
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::{uri_error, Error};
+use crate::avm2::error::{Error, make_error_1052};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::string::{AvmString, WStr, WString};
@@ -35,21 +35,21 @@ pub fn trace<'gc>(
 }
 
 pub fn is_finite<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let val = args.get_f64(activation, 0)?;
+    let val = args.get_f64(0);
 
     Ok(val.is_finite().into())
 }
 
 pub fn is_na_n<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let val = args.get_f64(activation, 0)?;
+    let val = args.get_f64(0);
 
     Ok(val.is_nan().into())
 }
@@ -59,8 +59,8 @@ pub fn parse_int<'gc>(
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let string = args.get_string(activation, 0)?;
-    let radix = args.get_i32(activation, 1)?;
+    let string = args.get_string(activation, 0);
+    let radix = args.get_i32(1);
 
     let result = crate::avm2::value::string_to_int(&string, radix, false);
     Ok(result.into())
@@ -71,8 +71,8 @@ pub fn parse_float<'gc>(
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let string = args.get_string(activation, 0)?;
-    let swf_version = activation.context.swf.version();
+    let string = args.get_string(activation, 0);
+    let swf_version = activation.context.root_swf.version();
 
     if let Some(result) = crate::avm2::value::string_to_f64(&string, swf_version, false) {
         Ok(result.into())
@@ -101,7 +101,7 @@ pub fn escape<'gc>(
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let value = args.get_string(activation, 0)?;
+    let value = args.get_string(activation, 0);
 
     let mut output = WString::new();
 
@@ -130,7 +130,7 @@ pub fn unescape<'gc>(
     _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let value = args.get_string(activation, 0)?;
+    let value = args.get_string(activation, 0);
 
     let mut output = WString::new();
     let mut index = 0;
@@ -178,6 +178,7 @@ pub fn encode_uri<'gc>(
         args,
         // Characters that are not escaped, sourced from as3 docs
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@;/?:@&=+$,#-_.!~*'()",
+        "encodeURI",
     )
 }
 
@@ -191,6 +192,7 @@ pub fn encode_uri_component<'gc>(
         args,
         // Characters that are not escaped, sourced from as3 docs
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.!~*'()",
+        "encodeURIComponent",
     )
 }
 
@@ -198,15 +200,18 @@ fn encode_utf8_with_exclusions<'gc>(
     activation: &mut Activation<'_, 'gc>,
     args: &[Value<'gc>],
     not_converted: &str,
+    func_name: &str,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let input = args.get_string(activation, 0)?;
+    let input = args.get_string(activation, 0);
     let mut output = String::new();
 
     let input_string = match input.units() {
         // Latin-1 values map directly to unicode codepoints,
         // so we can directly convert to a `char`
         Units::Bytes(bytes) => bytes.iter().map(|b| *b as char).collect(),
-        Units::Wide(wide) => String::from_utf16_lossy(wide),
+        Units::Wide(wide) => {
+            String::from_utf16(wide).map_err(|_| make_error_1052(activation, func_name))?
+        }
     };
 
     for x in input_string.chars() {
@@ -215,12 +220,10 @@ fn encode_utf8_with_exclusions<'gc>(
         } else {
             let mut bytes = [0; 4];
             let utf8_bytes = x.encode_utf8(&mut bytes);
-            let mut encoded = String::new();
             // Each byte in the utf-8 encoding is encoded as a hex value
             for byte in utf8_bytes.bytes() {
-                write!(encoded, "%{x:02X}", x = byte).unwrap();
+                write!(output, "%{byte:02X}").unwrap();
             }
-            output.push_str(&encoded);
         }
     }
 
@@ -259,14 +262,13 @@ where
 }
 
 // code derived from flash.utils.unescapeMultiByte
-// FIXME: support bugzilla #538107
 fn decode<'gc>(
     activation: &mut Activation<'_, 'gc>,
     args: &[Value<'gc>],
     reserved_set: &str,
     func_name: &str,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let value = args.get_string(activation, 0)?;
+    let value = args.get_string(activation, 0);
 
     let mut output = WString::new();
     let mut chars = value.chars();
@@ -274,11 +276,7 @@ fn decode<'gc>(
 
     while let Some(c) = chars.next() {
         let Ok(c) = c else {
-            return Err(Error::AvmError(uri_error(
-                activation,
-                &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                1052,
-            )?));
+            return Err(make_error_1052(activation, func_name));
         };
 
         if c != '%' {
@@ -288,66 +286,46 @@ fn decode<'gc>(
 
         bytes.clear();
         let Some(byte) = handle_percent(&mut chars) else {
-            return Err(Error::AvmError(uri_error(
-                activation,
-                &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                1052,
-            )?));
+            return Err(make_error_1052(activation, func_name));
         };
         bytes.push(byte);
         if (byte & 0x80) != 0 {
             let n = byte.leading_ones();
 
             if n == 1 || n > 4 {
-                return Err(Error::AvmError(uri_error(
-                    activation,
-                    &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                    1052,
-                )?));
+                return Err(make_error_1052(activation, func_name));
             }
 
             for _ in 1..n {
                 if chars.next() != Some(Ok('%')) {
-                    return Err(Error::AvmError(uri_error(
-                        activation,
-                        &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                        1052,
-                    )?));
+                    return Err(make_error_1052(activation, func_name));
                 }; // consume %
 
                 let Some(byte) = handle_percent(&mut chars) else {
-                    return Err(Error::AvmError(uri_error(
-                        activation,
-                        &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                        1052,
-                    )?));
+                    return Err(make_error_1052(activation, func_name));
                 };
 
                 if (byte & 0xC0) != 0x80 {
-                    return Err(Error::AvmError(uri_error(
-                        activation,
-                        &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                        1052,
-                    )?));
+                    return Err(make_error_1052(activation, func_name));
                 }
 
                 bytes.push(byte);
             }
         }
 
-        let Ok(decoded) = std::str::from_utf8(&bytes) else {
-            return Err(Error::AvmError(uri_error(
-                activation,
-                &format!("Error #1052: Invalid URI passed to {func_name} function."),
-                1052,
-            )?));
+        let is_reserved = if bytes.len() == 1 {
+            reserved_set.contains(bytes[0] as char)
+        } else {
+            // Multi-byte string cannot be reserved
+            false
         };
-        if reserved_set.contains(decoded) {
+
+        if is_reserved {
             for byte in &bytes {
-                write!(output, "%{x:02X}", x = byte).unwrap();
+                write!(output, "%{byte:02X}").unwrap();
             }
         } else {
-            output.push_utf8(decoded);
+            output.push_utf8_bytes(&bytes);
         }
     }
 

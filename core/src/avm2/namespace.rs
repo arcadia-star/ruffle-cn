@@ -1,6 +1,6 @@
 use crate::avm2::activation::Activation;
+use crate::avm2::error::{Error, make_error_1032};
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::Error;
 use crate::string::{AvmAtom, AvmString, StringContext};
 use gc_arena::{Collect, Gc};
 use num_traits::FromPrimitive;
@@ -18,7 +18,6 @@ pub struct Namespace<'gc>(
 );
 
 /// Represents the name of a namespace.
-#[allow(clippy::enum_variant_names)]
 #[derive(Copy, Clone, Collect, Debug, PartialEq, Eq)]
 #[collect(no_drop)]
 enum NamespaceData<'gc> {
@@ -94,12 +93,11 @@ impl<'gc> Namespace<'gc> {
 
         let actual_index = namespace_index.0 as usize - 1;
         let abc = translation_unit.abc();
-        let abc_namespace: Result<_, Error<'gc>> = abc
+        let abc_namespace = abc
             .constant_pool
             .namespaces
             .get(actual_index)
-            .ok_or_else(|| format!("Unknown namespace constant {}", namespace_index.0).into());
-        let abc_namespace = abc_namespace?;
+            .ok_or_else(|| make_error_1032(activation, namespace_index.0))?;
 
         let index = match abc_namespace {
             AbcNamespace::Namespace(idx)
@@ -247,27 +245,27 @@ impl<'gc> Namespace<'gc> {
         )))
     }
 
-    pub fn is_public(&self) -> bool {
+    pub fn is_public(self) -> bool {
         matches!(self.0.as_deref(), Some(NamespaceData::Namespace(name, _)) if name.as_wstr().is_empty())
     }
 
-    pub fn is_public_ignoring_ns(&self) -> bool {
+    pub fn is_public_ignoring_ns(self) -> bool {
         matches!(self.0.as_deref(), Some(NamespaceData::Namespace(_, _)))
     }
 
-    pub fn is_any(&self) -> bool {
+    pub fn is_any(self) -> bool {
         self.0.is_none()
     }
 
-    pub fn is_private(&self) -> bool {
+    pub fn is_private(self) -> bool {
         matches!(self.0.as_deref(), Some(NamespaceData::Private(_)))
     }
 
-    pub fn is_namespace(&self) -> bool {
+    pub fn is_namespace(self) -> bool {
         matches!(self.0.as_deref(), Some(NamespaceData::Namespace(_, _)))
     }
 
-    pub fn as_uri_opt(&self) -> Option<AvmString<'gc>> {
+    pub fn as_uri_opt(self) -> Option<AvmString<'gc>> {
         self.0.map(|data| match *data {
             NamespaceData::Namespace(a, _) => a.into(),
             NamespaceData::PackageInternal(a) => a.into(),
@@ -281,7 +279,7 @@ impl<'gc> Namespace<'gc> {
     /// Get the string value of this namespace, ignoring its type.
     ///
     /// TODO: Is this *actually* the namespace URI?
-    pub fn as_uri(&self, context: &mut StringContext<'gc>) -> AvmString<'gc> {
+    pub fn as_uri(self, context: &mut StringContext<'gc>) -> AvmString<'gc> {
         self.as_uri_opt().unwrap_or_else(|| context.empty())
     }
 
@@ -291,7 +289,7 @@ impl<'gc> Namespace<'gc> {
     ///
     /// Namespace does not implement `PartialEq`, so that each caller is required
     /// to explicitly choose either `exact_version_match` or `matches_ns`.
-    pub fn exact_version_match(&self, other: Self) -> bool {
+    pub fn exact_version_match(self, other: Self) -> bool {
         if self.0.map(Gc::as_ptr) == other.0.map(Gc::as_ptr) {
             true
         } else if self.is_private() || other.is_private() {
@@ -306,7 +304,7 @@ impl<'gc> Namespace<'gc> {
     /// seen by the other). This is used to implement `PropertyMap`, where we want to
     /// a definition with `ApiVersion::SWF_16` to be visible when queried from
     /// a SWF with `ApiVersion::SWF_16` or any higher version.
-    pub fn matches_ns(&self, other: Self) -> bool {
+    pub fn matches_ns(self, other: Self) -> bool {
         if self.exact_version_match(other) {
             return true;
         }
@@ -323,7 +321,7 @@ impl<'gc> Namespace<'gc> {
             _ => false,
         }
     }
-    pub fn matches_api_version(&self, match_version: ApiVersion) -> bool {
+    pub fn matches_api_version(self, match_version: ApiVersion) -> bool {
         match self.0.as_deref() {
             Some(NamespaceData::Namespace(_, version)) => version <= &match_version,
             _ => true,
@@ -337,7 +335,6 @@ impl<'gc> Namespace<'gc> {
 pub struct CommonNamespaces<'gc> {
     public_namespaces: [Namespace<'gc>; CommonNamespaces::PUBLIC_LEN],
 
-    pub(super) internal: Namespace<'gc>,
     pub(super) as3: Namespace<'gc>,
     pub(super) vector_internal: Namespace<'gc>,
 }
@@ -356,7 +353,6 @@ impl<'gc> CommonNamespaces<'gc> {
             public_namespaces: std::array::from_fn(|val| {
                 Namespace::package(empty_string, ApiVersion::from_usize(val).unwrap(), context)
             }),
-            internal: Namespace::internal(empty_string, context),
             as3: Namespace::package(as3_namespace_string, ApiVersion::AllVersions, context),
             vector_internal: Namespace::internal(vector_namespace_string, context),
         }

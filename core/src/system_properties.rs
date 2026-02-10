@@ -1,10 +1,9 @@
 use crate::context::UpdateContext;
 use bitflags::bitflags;
 use core::fmt;
-use fluent_templates::{langid, LanguageIdentifier};
+use fluent_templates::{LanguageIdentifier, langid};
 
 /// Available cpu architectures
-#[allow(dead_code)]
 pub enum CpuArchitecture {
     PowerPc,
     X86,
@@ -24,7 +23,6 @@ impl fmt::Display for CpuArchitecture {
 }
 
 /// The available host operating systems
-#[allow(dead_code)]
 pub enum OperatingSystem {
     WindowsXp,
     Windows2k,
@@ -54,7 +52,6 @@ impl fmt::Display for OperatingSystem {
 }
 
 /// The available player manufacturers
-#[allow(dead_code)]
 pub enum Manufacturer {
     Windows,
     Macintosh,
@@ -182,7 +179,6 @@ impl From<LanguageIdentifier> for Language {
 }
 
 /// The supported colors of the screen
-#[allow(dead_code)]
 pub enum ScreenColor {
     Color,
     Gray,
@@ -199,7 +195,6 @@ impl fmt::Display for ScreenColor {
     }
 }
 /// The type of the player
-#[allow(dead_code)]
 pub enum PlayerType {
     StandAlone,
     External,
@@ -309,19 +304,11 @@ impl SystemProperties {
     }
 
     fn encode_capability(&self, cap: SystemCapabilities) -> &str {
-        if self.has_capability(cap) {
-            "t"
-        } else {
-            "f"
-        }
+        if self.has_capability(cap) { "t" } else { "f" }
     }
 
     fn encode_not_capability(&self, cap: SystemCapabilities) -> &str {
-        if self.has_capability(cap) {
-            "f"
-        } else {
-            "t"
-        }
+        if self.has_capability(cap) { "f" } else { "t" }
     }
 
     fn encode_string(&self, s: &str) -> String {

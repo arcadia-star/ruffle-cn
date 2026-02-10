@@ -9,7 +9,6 @@
 # This is because some languages may use different wording for one or the other, especially with things like capitalisation.
 
 file-menu = Файл
-file-menu-open-quick = Відкрити...
 file-menu-open-advanced = Відкрити додаткові...
 file-menu-close = Закрити
 file-menu-reload = Перезавантажити
@@ -33,6 +32,7 @@ bookmarks-menu-add = Додати...
 bookmarks-menu-manage = Керувати закладками...
 debug-menu = Інструменти налагодження
 debug-menu-open-stage = Переглянути інформацію про сцену
+debug-menu-open-root-movie-clip = Переглянути кореневий MovieClip
 debug-menu-open-movie = Переглянути фільм
 debug-menu-open-movie-list = Показати відомі фільми
 debug-menu-open-domain-list = Показати домени
