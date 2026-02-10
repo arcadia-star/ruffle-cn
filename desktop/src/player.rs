@@ -374,6 +374,7 @@ impl ActivePlayer {
             player_lock.set_default_font(
                 DefaultFont::Sans,
                 vec![
+                    "Microsoft YaHei".into(),
                     "Arial".into(),
                     "Arimo".into(),
                     "Liberation Sans".into(),
