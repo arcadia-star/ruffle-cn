@@ -29,6 +29,7 @@ use crate::string::{AvmAtom, AvmString, HasStringContext, StringContext};
 use crate::tag_utils::SwfMovie;
 use gc_arena::Gc;
 use ruffle_macros::istr;
+use std::cell::Cell;
 use std::cmp::{Ordering, min};
 use std::sync::Arc;
 use swf::avm2::types::MethodFlags as AbcMethodFlags;
@@ -188,10 +189,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
             let mut proto = Some(global);
             while let Some(current_proto) = proto {
-                if let Some(current_proto) = current_proto.as_object() {
-                    if current_proto.base().has_own_dynamic_property(name) {
-                        return Ok(Some(global));
-                    }
+                if let Some(current_proto) = current_proto.as_object()
+                    && current_proto.base().has_own_dynamic_property(name)
+                {
+                    return Ok(Some(global));
                 }
 
                 proto = current_proto.proto(self).map(|o| o.into());
@@ -564,11 +565,27 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.stack.pop()
     }
 
+    /// Pops multiple values off the operand stack, collecting them into a collection.
+    #[inline]
+    #[must_use]
+    pub fn pop_stack_args<C>(&self, arg_count: u32) -> C
+    where
+        C: FromIterator<Value<'gc>>,
+    {
+        self.stack
+            .pop_args(arg_count)
+            .iter()
+            .map(Cell::get)
+            .collect()
+    }
+
     /// Pops multiple values off the operand stack.
     #[inline]
     #[must_use]
-    pub fn pop_stack_args(&self, arg_count: u32) -> Vec<Value<'gc>> {
-        self.stack.pop_args(arg_count)
+    pub fn get_args(&self, arg_count: u32) -> FunctionArgs<'a, 'gc> {
+        let slice = self.stack.pop_args(arg_count);
+
+        FunctionArgs::from_cell_slice(slice)
     }
 
     /// Pushes a scope onto the scope stack.
@@ -646,7 +663,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Op::PushInt { value } => self.op_push_int(*value),
                 Op::PushNamespace { namespace } => self.op_push_namespace(*namespace),
                 Op::PushNull => self.op_push_null(),
-                Op::PushShort { value } => self.op_push_short(*value),
                 Op::PushString { string } => self.op_push_string(*string),
                 Op::PushTrue => self.op_push_true(),
                 Op::PushUint { value } => self.op_push_uint(*value),
@@ -709,6 +725,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Op::GetDescendants { multiname } => self.op_get_descendants(*multiname),
                 Op::GetSlot { index } => self.op_get_slot(*index),
                 Op::SetSlot { index } => self.op_set_slot(*index),
+                Op::SetSlotCoerceI { index } => self.op_set_slot_coerce_i(*index),
                 Op::SetSlotNoCoerce { index } => self.op_set_slot_no_coerce(*index),
                 Op::SetGlobalSlot { index } => self.op_set_global_slot(*index),
                 Op::Construct { num_args } => self.op_construct(*num_args),
@@ -963,11 +980,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    fn op_push_short(&mut self, value: i16) -> Result<(), Error<'gc>> {
-        self.push_stack(value);
-        Ok(())
-    }
-
     fn op_push_string(&mut self, string: AvmAtom<'gc>) -> Result<(), Error<'gc>> {
         self.push_stack(string);
         Ok(())
@@ -1031,7 +1043,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_call(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let receiver = self.pop_stack();
         let function = self.pop_stack();
 
@@ -1044,7 +1056,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn op_call_method(
         &mut self,
-        index: u32,
+        index: usize,
         arg_count: u32,
         push_return_value: bool,
     ) -> Result<(), Error<'gc>> {
@@ -1055,7 +1067,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         // However, the optimizer can still generate it.
 
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let receiver = self.pop_stack().null_check(self, None)?;
 
         let value = receiver.call_method_with_args(index, args, self)?;
@@ -1095,7 +1107,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let multiname = multiname.fill_with_runtime_params(self)?;
         let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
 
@@ -1111,7 +1123,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let multiname = multiname.fill_with_runtime_params(self)?;
         let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
         let function = receiver.get_property(&multiname, self)?;
@@ -1127,7 +1139,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let multiname = multiname.fill_with_runtime_params(self)?;
         let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
 
@@ -1137,7 +1149,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_call_static(&mut self, method: Method<'gc>, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let receiver = self.pop_stack();
 
         // Ensure receiver is of the correct type
@@ -1162,7 +1174,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let multiname = multiname.fill_with_runtime_params(self)?;
 
         let bound_superclass_object = self
@@ -1243,14 +1255,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Value::Object(object) = object_value {
             match name_value {
                 Value::Integer(_) | Value::Number(_) => {
-                    if let Some(index) = name_value.try_as_index() {
-                        if let Some(value) = object.get_index_property(index) {
-                            let _ = self.pop_stack();
-                            let _ = self.pop_stack();
-                            self.push_stack(value);
+                    if let Some(index) = name_value.try_as_index()
+                        && let Some(value) = object.get_index_property(index)
+                    {
+                        let _ = self.pop_stack();
+                        let _ = self.pop_stack();
+                        self.push_stack(value);
 
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
                 }
                 Value::Object(name_object) => {
@@ -1318,14 +1330,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         if let Value::Object(object) = object_value {
             match name_value {
                 Value::Integer(_) | Value::Number(_) => {
-                    if let Some(index) = name_value.try_as_index() {
-                        if let Some(result) = object.set_index_property(self, index, value) {
-                            let _ = self.pop_stack();
-                            let _ = self.pop_stack();
-                            let _ = self.pop_stack();
+                    if let Some(index) = name_value.try_as_index()
+                        && let Some(result) = object.set_index_property(self, index, value)
+                    {
+                        let _ = self.pop_stack();
+                        let _ = self.pop_stack();
+                        let _ = self.pop_stack();
 
-                            return result;
-                        }
+                        return result;
                     }
                 }
                 Value::Object(name_object) => {
@@ -1393,16 +1405,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
             let name_value = self.stack.peek(0);
             let object = self.stack.peek(1);
-            if let Some(name_object) = name_value.as_object() {
-                if let Some(dictionary) = object.as_object().and_then(|o| o.as_dictionary_object())
-                {
-                    let _ = self.pop_stack();
-                    let _ = self.pop_stack();
-                    dictionary.delete_property_by_object(name_object, self.gc());
+            if let Some(name_object) = name_value.as_object()
+                && let Some(dictionary) = object.as_object().and_then(|o| o.as_dictionary_object())
+            {
+                let _ = self.pop_stack();
+                let _ = self.pop_stack();
+                dictionary.delete_property_by_object(name_object, self.gc());
 
-                    self.push_stack(true);
-                    return Ok(());
-                }
+                self.push_stack(true);
+                return Ok(());
             }
         }
 
@@ -1478,12 +1489,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let has_prop = match value {
             Value::Object(obj) => {
-                if let Some(dictionary) = obj.as_dictionary_object() {
-                    if let Some(name_object) = name_value.as_object() {
-                        self.push_stack(dictionary.has_property_by_object(name_object));
+                if let Some(dictionary) = obj.as_dictionary_object()
+                    && let Some(name_object) = name_value.as_object()
+                {
+                    self.push_stack(dictionary.has_property_by_object(name_object));
 
-                        return Ok(());
-                    }
+                    return Ok(());
                 }
 
                 let name = name_value.coerce_to_string(self)?;
@@ -1640,7 +1651,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    fn op_get_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
+    fn op_get_slot(&mut self, index: usize) -> Result<(), Error<'gc>> {
         let stack_top = self.stack.stack_top();
 
         let object = stack_top
@@ -1659,7 +1670,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    fn op_set_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
+    fn op_set_slot(&mut self, index: usize) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
         let object = self
             .pop_stack()
@@ -1672,7 +1683,22 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    fn op_set_slot_no_coerce(&mut self, index: u32) -> Result<(), Error<'gc>> {
+    fn op_set_slot_coerce_i(&mut self, index: usize) -> Result<(), Error<'gc>> {
+        let value = self.pop_stack();
+        let object = self
+            .pop_stack()
+            .null_check(self, None)?
+            .as_object()
+            .expect("Cannot set_slot on primitive");
+
+        let value = value.coerce_to_i32(self)?;
+
+        object.set_slot_no_coerce(index, value.into(), self.gc());
+
+        Ok(())
+    }
+
+    fn op_set_slot_no_coerce(&mut self, index: usize) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
         let object = self
             .pop_stack()
@@ -1685,7 +1711,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    fn op_set_global_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
+    fn op_set_global_slot(&mut self, index: usize) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
         self.global_scope()
@@ -1697,7 +1723,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_construct(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let ctor = self.pop_stack();
 
         let object = ctor.construct(self, args)?;
@@ -1712,7 +1738,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let multiname = multiname.fill_with_runtime_params(self)?;
         let source = self.pop_stack().null_check(self, Some(&multiname))?;
 
@@ -1723,8 +1749,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    fn op_construct_slot(&mut self, index: u32, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+    fn op_construct_slot(&mut self, index: usize, arg_count: u32) -> Result<(), Error<'gc>> {
+        let args = self.get_args(arg_count);
         let source = self
             .pop_stack()
             .null_check(self, None)?
@@ -1740,7 +1766,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_construct_super(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.stack.get_args(arg_count as usize);
+        let args = self.get_args(arg_count);
         let receiver = self.pop_stack().null_check(self, None)?;
 
         self.super_init(receiver, args)?;
@@ -1837,7 +1863,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_apply_type(&mut self, num_types: u32) -> Result<(), Error<'gc>> {
-        let args = self.pop_stack_args(num_types);
+        let args: Vec<_> = self.pop_stack_args(num_types);
         let base = self
             .pop_stack()
             .as_object()
@@ -1851,8 +1877,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     fn op_new_array(&mut self, num_args: u32) -> Result<(), Error<'gc>> {
-        let args = self.pop_stack_args(num_args);
-        let array = ArrayStorage::from_args(&args[..]);
+        let array = self.pop_stack_args(num_args);
         let array_obj = ArrayObject::from_storage(self.context, array);
 
         self.push_stack(array_obj);
@@ -1982,8 +2007,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value1 = self.pop_stack();
 
         let sum_value = match (value1, value2) {
-            // note: with not-yet-guaranteed assumption that Integer < 1<<28, this won't overflow.
-            (Value::Integer(n1), Value::Integer(n2)) => (n1 + n2).into(),
+            (Value::Integer(n1), Value::Integer(n2)) => {
+                if let Some(res) = n1.checked_add(n2) {
+                    res.into()
+                } else {
+                    ((n1 as i64 + n2 as i64) as f64).into()
+                }
+            }
             (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
             (Value::String(s), value2) => Value::String(AvmString::concat(
                 self.gc(),
@@ -2176,11 +2206,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // to help int-indexing.
         // Once we get a generic implicit double->int conversion,
         // we can reevaluate whether this path is needed.
-        if let (Value::Integer(n1), Value::Integer(n2)) = (value1, value2) {
-            if let Some(result) = n1.checked_mul(n2) {
-                self.push_stack(result);
-                return Ok(());
-            }
+        if let (Value::Integer(n1), Value::Integer(n2)) = (value1, value2)
+            && let Some(result) = n1.checked_mul(n2)
+        {
+            self.push_stack(result);
+            return Ok(());
         }
         let value2 = value2.coerce_to_number(self)?;
         let value1 = value1.coerce_to_number(self)?;
@@ -2228,8 +2258,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value1 = self.pop_stack();
 
         let sub_value: Value<'gc> = match (value1, value2) {
-            // note: with not-yet-guaranteed assumption that Integer < 1<<28, this won't underflow.
-            (Value::Integer(n1), Value::Integer(n2)) => (n1 - n2).into(),
+            (Value::Integer(n1), Value::Integer(n2)) => {
+                if let Some(res) = n1.checked_sub(n2) {
+                    res.into()
+                } else {
+                    ((n1 as i64 - n2 as i64) as f64).into()
+                }
+            }
             (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
             _ => {
                 let value2 = value2.coerce_to_number(self)?;

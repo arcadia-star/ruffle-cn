@@ -163,7 +163,9 @@ pub use crate::avm2::object::worker_object::{WorkerObject, WorkerObjectWeak};
 pub use crate::avm2::object::xml_list_object::{
     E4XOrXml, XmlListObject, XmlListObjectWeak, xml_list_allocator,
 };
-pub use crate::avm2::object::xml_object::{XmlObject, XmlObjectWeak, xml_allocator};
+pub use crate::avm2::object::xml_object::{
+    NotificationCommand, XmlObject, XmlObjectWeak, xml_allocator,
+};
 use crate::font::Font;
 
 /// Represents an object that can be directly interacted with by the AVM2
@@ -260,7 +262,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
 
         let base = self.base();
         let values = base.values();
-        let value = values.as_hashmap().get(&key);
+        let value = values.get(&key);
         value.map(|v| v.value)
     }
 
@@ -325,24 +327,6 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
         None
     }
 
-    /// Init a local property of the object. The Multiname should always be public.
-    ///
-    /// This skips class field lookups and looks at:
-    /// - object-specific storage (like arrays)
-    /// - Object dynamic properties
-    ///
-    /// This should be effectively equivalent to set_property_local,
-    /// as "init" is a concept specific to class const fields.
-    fn init_property_local(
-        self,
-        name: &Multiname<'gc>,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-    ) -> Result<(), Error<'gc>> {
-        let base = self.base();
-        base.init_property_local(name, value, activation)
-    }
-
     /// Call a local property of the object. The Multiname should always be public.
     ///
     /// This skips class field lookups and looks at:
@@ -399,7 +383,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
     /// Retrieve a slot by its index.
     #[no_dynamic]
     #[inline(always)]
-    fn get_slot(self, id: u32) -> Value<'gc> {
+    fn get_slot(self, id: usize) -> Value<'gc> {
         let base = self.base();
 
         base.get_slot(id)
@@ -409,7 +393,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
     #[no_dynamic]
     fn set_slot(
         self,
-        id: u32,
+        id: usize,
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
@@ -422,7 +406,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
     }
 
     #[no_dynamic]
-    fn set_slot_no_coerce(self, id: u32, value: Value<'gc>, mc: &Mutation<'gc>) {
+    fn set_slot_no_coerce(self, id: usize, value: Value<'gc>, mc: &Mutation<'gc>) {
         let base = self.base();
 
         base.set_slot(id, value, mc);
@@ -580,7 +564,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
     fn install_bound_method(
         &self,
         mc: &Mutation<'gc>,
-        disp_id: u32,
+        disp_id: usize,
         function: FunctionObject<'gc>,
     ) {
         let base = self.base();
@@ -691,7 +675,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
     }
 
     #[no_dynamic]
-    fn get_bound_method(&self, id: u32) -> Option<FunctionObject<'gc>> {
+    fn get_bound_method(&self, id: usize) -> Option<FunctionObject<'gc>> {
         let base = self.base();
         base.get_bound_method(id)
     }

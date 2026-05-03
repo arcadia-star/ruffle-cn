@@ -319,7 +319,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         }
     }
 
-    fn clamp_bitmap(&mut self, bitmap: &mut Bitmap) -> bool {
+    fn clamp_bitmap(&self, bitmap: &mut Bitmap) -> bool {
         let max_size = self.descriptors.limits.max_texture_dimension_2d;
         if bitmap.width() > max_size || bitmap.height() > max_size {
             let image =
@@ -519,7 +519,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         for entry in cache_entries {
             let texture = as_texture(&entry.handle);
-            let mut surface = Surface::new(
+            let surface = Surface::new(
                 &self.descriptors,
                 self.surface.quality(),
                 texture.texture.width(),
@@ -592,6 +592,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                 );
             }
+            // Periodically flush GPU work to prevent OOM when many cache entries
+            // accumulate (e.g. when a large container's cacheAsBitmap is skipped
+            // but its hundreds of children each have their own bitmap caches).
+            self.active_frame.maybe_flush(&self.descriptors);
         }
 
         self.surface.draw_commands_and_copy_to(
@@ -748,7 +752,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             .get_next_texture()
             .expect("TextureTargetFrame.get_next_texture is infallible");
 
-        let mut surface = Surface::new(
+        let surface = Surface::new(
             &self.descriptors,
             quality,
             texture.texture.width(),

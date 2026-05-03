@@ -24,8 +24,8 @@ use crate::string::{AvmString, WStr};
 use ruffle_render::shape_utils::{DrawCommand, FillRule, GradientType};
 use std::f64::consts::FRAC_1_SQRT_2;
 use swf::{
-    Color, FillStyle, Fixed8, Fixed16, Gradient, GradientInterpolation, GradientRecord,
-    GradientSpread, LineCapStyle, LineJoinStyle, LineStyle, Matrix, Point, Twips,
+    Color, FillStyle, Fixed8, Gradient, GradientInterpolation, GradientRecord, GradientSpread,
+    LineCapStyle, LineJoinStyle, LineStyle, Matrix, Point, Twips,
 };
 
 /// Convert an RGB `color` and `alpha` argument pair into a `swf::Color`.
@@ -68,7 +68,7 @@ pub fn begin_bitmap_fill<'gc>(
             .as_bitmap_data()
             .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
         let matrix = if let Some(matrix) = args.try_get_object(1) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -125,7 +125,7 @@ pub fn begin_gradient_fill<'gc>(
         )?;
 
         let matrix = if let Some(matrix) = args.try_get_object(4) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -260,10 +260,10 @@ pub fn clear<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    if let Some(this) = this.as_display_object() {
-        if let Some(mut draw) = this.as_drawing() {
-            draw.clear()
-        }
+    if let Some(this) = this.as_display_object()
+        && let Some(mut draw) = this.as_drawing()
+    {
+        draw.clear()
     }
 
     Ok(Value::Undefined)
@@ -302,10 +302,10 @@ pub fn end_fill<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    if let Some(this) = this.as_display_object() {
-        if let Some(mut draw) = this.as_drawing() {
-            draw.set_fill_style(None);
-        }
+    if let Some(this) = this.as_display_object()
+        && let Some(mut draw) = this.as_drawing()
+    {
+        draw.set_fill_style(None);
     }
 
     Ok(Value::Undefined)
@@ -903,7 +903,7 @@ pub fn line_gradient_style<'gc>(
             ratios,
         )?;
         let matrix = if let Some(matrix) = args.try_get_object(4) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -1012,15 +1012,10 @@ pub fn draw_path<'gc>(
     let mut drawing = this.as_drawing().unwrap();
     let commands = args.get_object(activation, 0, "commands")?;
     let data = args.get_object(activation, 1, "data")?;
-    let winding = args.get_string(activation, 2);
-
-    let fill_rule = if winding == WStr::from_units(b"nonZero") {
-        FillRule::NonZero
-    } else if winding == WStr::from_units(b"evenOdd") {
-        FillRule::EvenOdd
-    } else {
-        return Err(make_error_2008(activation, "winding"));
-    };
+    let fill_rule = args
+        .get_string(activation, 2)
+        .parse()
+        .map_err(|_| make_error_2008(activation, "winding"))?;
 
     // FIXME - implement fill behavior described in the Flash docs
     // (which is different from just running each command sequentially on `Graphics`)
@@ -1049,29 +1044,29 @@ pub fn draw_triangles<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
-    if let Some(this) = this.as_display_object() {
-        if let Some(mut drawing) = this.as_drawing() {
-            let vertices = args.get_object(activation, 0, "vertices")?;
+    if let Some(this) = this.as_display_object()
+        && let Some(mut drawing) = this.as_drawing()
+    {
+        let vertices = args.get_object(activation, 0, "vertices")?;
 
-            let indices = args.try_get_object(1);
+        let indices = args.try_get_object(1);
 
-            let uvt_data = args.try_get_object(2);
+        let uvt_data = args.try_get_object(2);
 
-            let culling = {
-                let culling = args.get_string(activation, 3);
-                TriangleCulling::from_string(culling)
-                    .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?
-            };
+        let culling = {
+            let culling = args.get_string(activation, 3);
+            TriangleCulling::from_string(culling)
+                .ok_or_else(|| make_error_2004(activation, Error2004Type::ArgumentError))?
+        };
 
-            draw_triangles_internal(
-                activation,
-                &mut drawing,
-                &vertices,
-                indices.as_ref(),
-                uvt_data.as_ref(),
-                culling,
-            )?;
-        }
+        draw_triangles_internal(
+            activation,
+            &mut drawing,
+            &vertices,
+            indices.as_ref(),
+            uvt_data.as_ref(),
+            culling,
+        )?;
     }
 
     Ok(Value::Undefined)
@@ -1310,7 +1305,7 @@ pub fn line_bitmap_style<'gc>(
             .as_bitmap_data()
             .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
         let matrix = if let Some(matrix) = args.try_get_object(1) {
-            Matrix::from(object_to_matrix(matrix, activation)?)
+            Matrix::from(object_to_matrix(matrix))
         } else {
             // Users can explicitly pass in `null` to mean identity matrix
             Matrix::IDENTITY
@@ -1326,8 +1321,8 @@ pub fn line_bitmap_style<'gc>(
             height: bitmap.height(),
         };
         let scale_matrix = Matrix::scale(
-            Fixed16::from_f64(bitmap.width as f64),
-            Fixed16::from_f64(bitmap.height as f64),
+            (Twips::TWIPS_PER_PIXEL as i16).into(),
+            (Twips::TWIPS_PER_PIXEL as i16).into(),
         );
 
         if let Some(mut draw) = this.as_drawing() {
@@ -1490,17 +1485,11 @@ fn handle_igraphics_data<'gc>(
 
         let data = obj.get_slot(graphics_path_slots::DATA).as_object();
 
-        let winding = obj
+        let fill_rule = obj
             .get_slot(graphics_path_slots::_WINDING)
-            .coerce_to_string(activation)?;
-
-        let fill_rule = if winding == WStr::from_units(b"nonZero") {
-            FillRule::NonZero
-        } else if winding == WStr::from_units(b"evenOdd") {
-            FillRule::EvenOdd
-        } else {
-            unreachable!("AS3 setter guarantees value of winding");
-        };
+            .coerce_to_string(activation)?
+            .parse()
+            .expect("AS3 setter guarantees value of winding");
 
         if let (Some(commands), Some(data)) = (commands, data) {
             process_commands(
@@ -1703,7 +1692,7 @@ fn handle_gradient_fill<'gc>(
             .as_object();
 
         match matrix {
-            Some(matrix) => Matrix::from(object_to_matrix(matrix, activation)?),
+            Some(matrix) => Matrix::from(object_to_matrix(matrix)),
             None => Matrix::IDENTITY,
         }
     };
@@ -1770,11 +1759,7 @@ fn handle_bitmap_fill<'gc>(
     let matrix = obj
         .get_slot(graphics_bitmap_fill_slots::MATRIX)
         .as_object()
-        .and_then(|matrix| {
-            let matrix = Matrix::from(object_to_matrix(matrix, activation).ok()?);
-
-            Some(matrix)
-        })
+        .map(|matrix| Matrix::from(object_to_matrix(matrix)))
         .unwrap_or(Matrix::IDENTITY);
 
     let is_repeating = obj
@@ -1794,8 +1779,8 @@ fn handle_bitmap_fill<'gc>(
     };
 
     let scale_matrix = Matrix::scale(
-        Fixed16::from_f64(bitmap.width as f64),
-        Fixed16::from_f64(bitmap.height as f64),
+        (Twips::TWIPS_PER_PIXEL as i16).into(),
+        (Twips::TWIPS_PER_PIXEL as i16).into(),
     );
 
     let id = drawing.add_bitmap(bitmap);

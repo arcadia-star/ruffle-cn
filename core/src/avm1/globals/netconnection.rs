@@ -306,10 +306,10 @@ fn close<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(net_connection) = NetConnection::cast(this.into()) {
-        if let Some(previous_handle) = net_connection.set_handle(None) {
-            NetConnections::close(activation.context, previous_handle, true);
-        }
+    if let Some(net_connection) = NetConnection::cast(this.into())
+        && let Some(previous_handle) = net_connection.set_handle(None)
+    {
+        NetConnections::close(activation.context, previous_handle, true);
     }
     Ok(Value::Undefined)
 }
@@ -319,17 +319,16 @@ fn connect<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if matches!(
-        args.get(0),
-        None | Some(Value::Undefined) | Some(Value::Null)
-    ) {
+    if matches!(args.get(0), None | Some(Value::Undefined | Value::Null)) {
         NetConnections::connect_to_local(activation.context, this);
         return Ok(Value::Undefined);
     }
 
     let url = args[0].coerce_to_string(activation)?;
-    if url.starts_with(WStr::from_units(b"http://"))
-        || url.starts_with(WStr::from_units(b"https://"))
+    let url_lower = url.to_ascii_lowercase();
+
+    if url_lower.starts_with(WStr::from_units(b"http://"))
+        || url_lower.starts_with(WStr::from_units(b"https://"))
     {
         // HTTP(S) is for Flash Remoting, which is just POST requests to the URL.
         NetConnections::connect_to_flash_remoting(activation.context, this, url.to_string());

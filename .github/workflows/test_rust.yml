@@ -103,6 +103,8 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          RUFFLE_TEST_OPTS: "--compile-mode=compile-and-verify"
         run: cargo nextest run --profile ci --cargo-profile ci ${TEST_OPTS} --features ${FEATURES}
 
       - name: Run doctests
@@ -111,7 +113,7 @@ jobs:
 
       - name: Upload images
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: swf_images_${{ matrix.rust_version }}_${{ matrix.os }}
           path: |
@@ -246,7 +248,7 @@ jobs:
 
       - name: Upload llvm-cov reports
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: llvm-cov
           path: target/llvm-cov
@@ -262,7 +264,7 @@ jobs:
 
       - name: Upload diff-cover reports
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: diff-cover
           path: target/diff-cover

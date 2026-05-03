@@ -326,6 +326,14 @@ impl DisplayObjectWindow {
         Grid::new(ui.id().with("edittext"))
             .num_columns(2)
             .show(ui, |ui| {
+                ui.label("Is FTE");
+                if object.is_fte() {
+                    ui.label("Yes");
+                } else {
+                    ui.label("No");
+                }
+                ui.end_row();
+
                 ui.label("Border");
                 ui.horizontal(|ui| {
                     let mut has_border = object.has_border();
@@ -1697,9 +1705,6 @@ fn summary_color_transform(ct: ColorTransform) -> Cow<'static, str> {
         if let Some(entry) = summary_color_transform_entry("C", ct.r_multiply, ct.r_add) {
             lines.push(entry);
         }
-        if let Some(entry) = summary_color_transform_entry("A", ct.a_multiply, ct.a_add) {
-            lines.push(entry);
-        }
     } else {
         if let Some(entry) = summary_color_transform_entry("R", ct.r_multiply, ct.r_add) {
             lines.push(entry);
@@ -1710,9 +1715,10 @@ fn summary_color_transform(ct: ColorTransform) -> Cow<'static, str> {
         if let Some(entry) = summary_color_transform_entry("B", ct.b_multiply, ct.b_add) {
             lines.push(entry);
         }
-        if let Some(entry) = summary_color_transform_entry("A", ct.a_multiply, ct.a_add) {
-            lines.push(entry);
-        }
+    }
+
+    if let Some(entry) = summary_color_transform_entry("A", ct.a_multiply, ct.a_add) {
+        lines.push(entry);
     }
 
     if lines.is_empty() {

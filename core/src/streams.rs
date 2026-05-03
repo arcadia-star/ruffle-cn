@@ -28,6 +28,7 @@ use flv_rs::{
 use gc_arena::barrier::unlock;
 use gc_arena::{Collect, DynamicRoot, Gc, Lock, Mutation, Rootable};
 use ruffle_common::buffer::{Buffer, Slice, Substream, SubstreamError};
+use ruffle_common::duration::FloatDuration;
 use ruffle_macros::istr;
 use ruffle_render::bitmap::BitmapInfo;
 use ruffle_video::VideoStreamHandle;
@@ -127,7 +128,7 @@ impl<'gc> StreamManager<'gc> {
     /// support video framerates separate from the Stage frame rate.
     ///
     /// This does not borrow `&mut self` as we need the `UpdateContext`, too.
-    pub fn tick(context: &mut UpdateContext<'gc>, dt: f64) {
+    pub fn tick(context: &mut UpdateContext<'gc>, dt: FloatDuration) {
         let streams = context.stream_manager.active_streams.clone();
         for stream in streams {
             stream.tick(context, dt)
@@ -354,7 +355,7 @@ impl<'gc> NetStream<'gc> {
     ///
     /// Externally visible AVM state must not be reinitialized here - i.e. the
     /// AS3 `client` doesn't go away because you played a new video file.
-    pub fn reset_buffer(self, context: &mut UpdateContext<'gc>) {
+    fn reset_buffer(self, context: &mut UpdateContext<'gc>) {
         if let Some(instance) = self.source().sound_instance.get() {
             // We stop the sound twice because sounds may have either been
             // played through the audio manager or through the backend directly
@@ -601,6 +602,8 @@ impl<'gc> NetStream<'gc> {
             };
             self.0.url.replace(Some(request.url().to_string()));
             self.source().preload_offset.set(0);
+            self.reset_buffer(context);
+
             let future = crate::loader::load_netstream(context, self, request);
 
             context.navigator.spawn_future(future);
@@ -728,15 +731,17 @@ impl<'gc> NetStream<'gc> {
                         FlvSoundFormat::Nellymoser16kHz => AudioCompression::Nellymoser16Khz,
                         FlvSoundFormat::Nellymoser8kHz => AudioCompression::Nellymoser8Khz,
                         FlvSoundFormat::Nellymoser => AudioCompression::Nellymoser,
-                        FlvSoundFormat::G711ALawPCM => return Err(NetstreamError::UnknownCodec),
-                        FlvSoundFormat::G711MuLawPCM => return Err(NetstreamError::UnknownCodec),
+                        FlvSoundFormat::G711ALawPCM => AudioCompression::G711ALawPCM,
+                        FlvSoundFormat::G711MuLawPCM => AudioCompression::G711MuLawPCM,
                         FlvSoundFormat::Aac => AudioCompression::Aac,
                         FlvSoundFormat::Speex => AudioCompression::Speex,
                         FlvSoundFormat::MP38kHz => AudioCompression::Mp3,
                         FlvSoundFormat::DeviceSpecific => return Err(NetstreamError::UnknownCodec),
                     },
                     sample_rate: match (audio_data.format, audio_data.rate) {
-                        (FlvSoundFormat::MP38kHz, _) => 8_000,
+                        (FlvSoundFormat::G711ALawPCM, _)
+                        | (FlvSoundFormat::G711MuLawPCM, _)
+                        | (FlvSoundFormat::MP38kHz, _) => 8_000,
                         (_, FlvSoundRate::R5_500) => 5_500,
                         (_, FlvSoundRate::R11_000) => 11_000,
                         (_, FlvSoundRate::R22_000) => 22_000,
@@ -920,11 +925,11 @@ impl<'gc> NetStream<'gc> {
         let buffer = slice.data();
 
         match (video_handle, codec, video_data.data) {
-            (maybe_video_handle, Some(codec), FlvVideoPacket::Data(mut data))
-            | (
+            (
                 maybe_video_handle,
                 Some(codec),
-                FlvVideoPacket::Vp6Data {
+                FlvVideoPacket::Data(mut data)
+                | FlvVideoPacket::Vp6Data {
                     hadjust: _,
                     vadjust: _,
                     mut data,
@@ -1166,8 +1171,8 @@ impl<'gc> NetStream<'gc> {
 
     /// Process stream data.
     ///
-    /// `dt` is in milliseconds.
-    pub fn tick(self, context: &mut UpdateContext<'gc>, dt: f64) {
+    /// `dt` is the elapsed time since the last tick.
+    pub fn tick(self, context: &mut UpdateContext<'gc>, dt: FloatDuration) {
         let source = self.source();
         let seek_offset = source.queued_seek_time.take();
         if let Some(offset) = seek_offset {
@@ -1189,7 +1194,7 @@ impl<'gc> NetStream<'gc> {
         let slice = source.buffer.borrow().to_full_slice();
         let buffer = slice.data();
 
-        let max_time = source.stream_time.get() + dt;
+        let max_time = source.stream_time.get() + dt.as_millis();
         let mut buffer_underrun = false;
         let mut error = false;
         let mut max_lookahead_audio_tags = 5;
@@ -1287,13 +1292,16 @@ impl<'gc> NetStream<'gc> {
                 );
             }
 
-            self.trigger_status_event(
-                context,
-                [("code", "NetStream.Buffer.Empty"), ("level", "status")],
-            );
+            // Check if AVM code in the event handler invoked stream.play() and replaced the source.
+            if Gc::ptr_eq(source, self.source()) {
+                self.trigger_status_event(
+                    context,
+                    [("code", "NetStream.Buffer.Empty"), ("level", "status")],
+                );
 
-            if is_end_of_video {
-                self.pause(context, false);
+                if is_end_of_video {
+                    self.pause(context, false);
+                }
             }
         }
 

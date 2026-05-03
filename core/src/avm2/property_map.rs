@@ -6,7 +6,6 @@ use crate::avm2::Namespace;
 use crate::avm2::QName;
 use fnv::FnvBuildHasher;
 use gc_arena::Collect;
-use gc_arena::collect::Trace;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::mem::swap;
@@ -25,23 +24,11 @@ use std::mem::swap;
 /// The internal structure of the `PropertyMap` technically allows storage of
 /// multiple values per `QName`. It's implementation enforces the invariant
 /// that each `QName` only have one associated `V`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Collect)]
+#[collect(no_drop)]
 pub struct PropertyMap<'gc, V>(
     HashMap<AvmString<'gc>, SmallVec<[(Namespace<'gc>, V); 2]>, FnvBuildHasher>,
 );
-
-unsafe impl<'gc, V: Collect<'gc>> Collect<'gc> for PropertyMap<'gc, V> {
-    #[inline]
-    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
-        for (key, value) in self.0.iter() {
-            cc.trace(key);
-            for (ns, v) in value.iter() {
-                cc.trace(ns);
-                cc.trace(v);
-            }
-        }
-    }
-}
 
 impl<V> Default for PropertyMap<'_, V> {
     fn default() -> Self {
@@ -96,13 +83,12 @@ impl<'gc, V> PropertyMap<'gc, V> {
     }
 
     pub fn get_mut(&mut self, name: QName<'gc>) -> Option<&mut V> {
-        if let Some(bucket) = self.0.get_mut(&name.local_name()) {
-            if let Some((_, old_value)) = bucket
+        if let Some(bucket) = self.0.get_mut(&name.local_name())
+            && let Some((_, old_value)) = bucket
                 .iter_mut()
                 .find(|(n, _)| n.matches_ns(name.namespace()))
-            {
-                return Some(old_value);
-            }
+        {
+            return Some(old_value);
         }
 
         None
