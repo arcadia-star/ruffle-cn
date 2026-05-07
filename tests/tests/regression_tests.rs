@@ -7,7 +7,7 @@ use crate::external_interface::tests::{external_interface_avm1, external_interfa
 use crate::shared_object::{shared_object_avm1, shared_object_avm2, shared_object_self_ref_avm1};
 use anyhow::Context;
 use clap::Parser;
-use libtest_mimic::Trial;
+use libtest_mimic::{Arguments, Trial};
 use ruffle_fs_tests_runner::FsTestsRunner;
 use ruffle_test_framework::environment::CompileMode;
 use ruffle_test_framework::options::TestOptions;
@@ -66,17 +66,20 @@ fn main() {
     let env = Arc::new(NativeEnvironment::new(ruffle_test_opts.compile_mode));
 
     let mut runner = FsTestsRunner::new();
+    let is_listing_only = Arguments::from_args().list;
 
     let env_clone = env.clone();
     runner
+        .with_args_from_libtest_mimic()
         .with_descriptor_name(Cow::Borrowed(TEST_TOML_NAME))
         .with_root_dir(PathBuf::from("tests/swfs"))
         .with_test_loader(Box::new(move |params, register_trial| {
             for test in load_test_dir(&params.test_dir, params.test_name) {
-                let trial = trial_for_test(&env_clone, &ruffle_test_opts, test, params.args.list);
+                let trial = trial_for_test(&env_clone, &ruffle_test_opts, test, is_listing_only);
                 register_trial(trial);
             }
-        }));
+        }))
+        .sorted_by_name();
 
     // Manual tests here, since #[test] doesn't work once we use our own test harness
     let env_clone = env.clone();
